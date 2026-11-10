@@ -34,6 +34,7 @@ export function useTween(target: number, ms = 650) {
 export function Landing() {
   const ir = useMemo(() => sampleIr(SAMPLES[0].file)!, [])
   const [on, setOn] = useState<FixId[]>([])
+  const narrow = useMemo(() => matchMedia('(max-width: 720px)').matches, [])
   const touched = useRef(false)
   useEffect(() => {
     if (matchMedia('(prefers-reduced-motion: reduce)').matches) return
@@ -73,7 +74,7 @@ export function Landing() {
               <div className="kpi-mini"><small>Readiness</small><b className="tab-nums">{Math.round(score)}</b></div>
             </div>
             <div className="hero-graph">
-              <GraphView ir={ir} a={a} dir="LR" compact animate label="Synthetic detector graph; blue nodes run on the NPU, red nodes fall back to the CPU" />
+              <GraphView ir={ir} a={a} dir="LR" wrap={narrow ? 4 : 6} compact animate label="Synthetic detector graph; blue nodes run on the NPU, red nodes fall back to the CPU" />
             </div>
             <div className="fix-toggles" role="group" aria-label="Suggested fixes">
               {HERO_FIXES.map(f => {

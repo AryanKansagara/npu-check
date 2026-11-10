@@ -6,8 +6,8 @@ export interface Laid { index: number; layer: number; pos: number; x: number; y:
 export interface Layout { nodes: Laid[]; edges: { from: number; to: number; tensor: string }[]; layers: number; width: number; height: number }
 
 /** `dir` LR puts layers on x; TB on y. Constant nodes are skipped. */
-export function layoutGraph(ir: ModelIR, opts: { dir?: 'LR' | 'TB'; gapLayer?: number; gapNode?: number } = {}): Layout {
-  const { dir = 'TB', gapLayer = 64, gapNode = 150 } = opts
+export function layoutGraph(ir: ModelIR, opts: { dir?: 'LR' | 'TB'; gapLayer?: number; gapNode?: number; wrap?: number; rowGap?: number } = {}): Layout {
+  const { dir = 'TB', gapLayer = 64, gapNode = 150, wrap = 0, rowGap = 40 } = opts
   const show = (i: number) => ir.nodes[i].op !== 'Constant'
   const producer = new Map<string, number>()
   ir.nodes.forEach((n, i) => n.outputs.forEach(o => o && producer.set(o, i)))
@@ -40,6 +40,17 @@ export function layoutGraph(ir: ModelIR, opts: { dir?: 'LR' | 'TB'; gapLayer?: n
   sweep(rows, preds)
   const widest = Math.max(1, ...rows.map(r => r.length))
   const nodes: Laid[] = []
+  if (wrap > 0 && dir === 'LR') {
+    // Boustrophedon: layers fill rows of `wrap`, alternating direction, so long chains fit a wide card.
+    const band = (widest - 1) * gapNode + rowGap
+    rows.forEach((r, l) => r.forEach(i => {
+      const row = Math.floor(l / wrap), col = l % wrap
+      const p = pos.get(i)! + (widest - r.length) / 2
+      nodes.push({ index: i, layer: l, pos: p, x: (row % 2 ? wrap - 1 - col : col) * gapLayer, y: row * band + p * gapNode })
+    }))
+    const nRows = Math.ceil(nLayers / wrap)
+    return { nodes, edges, layers: nLayers, width: (Math.min(wrap, nLayers) - 1) * gapLayer, height: (nRows - 1) * band + (widest - 1) * gapNode }
+  }
   rows.forEach((r, l) => r.forEach(i => {
     // Center each layer on the widest one.
     const p = pos.get(i)! + (widest - r.length) / 2

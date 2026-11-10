@@ -16,6 +16,7 @@ interface Props {
   zoom?: number
   animate?: boolean
   label?: string
+  wrap?: number
 }
 
 export function nodeClass(a: Analysis, i: number) {
@@ -25,9 +26,9 @@ export function nodeClass(a: Analysis, i: number) {
   return n.support === 'constrained' ? 'con' : 'npu'
 }
 
-export function GraphView({ ir, a, dir = 'TB', compact, query = '', selected, onSelect, zoom = 1, animate, label }: Props) {
+export function GraphView({ ir, a, dir = 'TB', compact, query = '', selected, onSelect, zoom = 1, animate, label, wrap = 0 }: Props) {
   const W = compact ? 92 : 136, H = compact ? 26 : 40
-  const layout = useMemo(() => layoutGraph(ir, { dir, gapLayer: dir === 'LR' ? (compact ? 118 : 170) : 72, gapNode: dir === 'LR' ? (compact ? 40 : 58) : 160 }), [ir, dir, compact])
+  const layout = useMemo(() => layoutGraph(ir, { dir, wrap, rowGap: 56, gapLayer: dir === 'LR' ? (compact ? 112 : 170) : 72, gapNode: dir === 'LR' ? (compact ? 36 : 58) : 160 }), [ir, dir, compact, wrap])
   const byIdx = useMemo(() => new Map(layout.nodes.map(n => [n.index, n])), [layout])
   const q = query.trim().toLowerCase()
   const hits = useMemo(() => q ? new Set(layout.nodes.filter(n => { const m = ir.nodes[n.index]; return m.name.toLowerCase().includes(q) || m.op.toLowerCase().includes(q) || m.outputs.some(o => o.toLowerCase().includes(q)) }).map(n => n.index)) : null, [q, layout, ir])
@@ -45,7 +46,13 @@ export function GraphView({ ir, a, dir = 'TB', compact, query = '', selected, on
   const cx = (i: number) => byIdx.get(i)!.x + pad, cy = (i: number) => byIdx.get(i)!.y + pad
   const edgePath = (f: number, t: number) => {
     if (dir === 'LR') {
-      const x1 = cx(f) + W, y1 = cy(f) + H / 2, x2 = cx(t), y2 = cy(t) + H / 2, m = (x1 + x2) / 2
+      const row = (i: number) => wrap ? Math.floor(byIdx.get(i)!.layer / wrap) : 0
+      if (row(f) !== row(t)) {
+        const x1 = cx(f) + W / 2, y1 = cy(f) + H, x2 = cx(t) + W / 2, y2 = cy(t), m = (y1 + y2) / 2
+        return `M${x1},${y1} C${x1},${m} ${x2},${m} ${x2},${y2}`
+      }
+      const rev = row(f) % 2 === 1
+      const x1 = rev ? cx(f) : cx(f) + W, y1 = cy(f) + H / 2, x2 = rev ? cx(t) + W : cx(t), y2 = cy(t) + H / 2, m = (x1 + x2) / 2
       return `M${x1},${y1} C${m},${y1} ${m},${y2} ${x2},${y2}`
     }
     const x1 = cx(f) + W / 2, y1 = cy(f) + H, x2 = cx(t) + W / 2, y2 = cy(t), m = (y1 + y2) / 2

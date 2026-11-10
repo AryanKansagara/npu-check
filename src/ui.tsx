@@ -28,7 +28,7 @@ export const fmtPct = (n: number, d = 0) => Number.isFinite(n) ? `${(n * 100).to
 export const fmtDate = (t: number) => new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 /** 1234567 -> "1.23M" */
 export const fmtSi = (n: number, d = 2) => !Number.isFinite(n) ? '—' : n >= 1e12 ? `${(n / 1e12).toFixed(d)}T` : n >= 1e9 ? `${(n / 1e9).toFixed(d)}G` : n >= 1e6 ? `${(n / 1e6).toFixed(d)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(d === 2 ? 1 : d)}K` : String(Math.round(n))
-export const fmtMs = (ms: number) => !Number.isFinite(ms) ? '—' : ms < 0.01 ? `${(ms * 1000).toFixed(1)} µs` : ms < 10 ? `${ms.toFixed(2)} ms` : ms < 1000 ? `${ms.toFixed(0)} ms` : `${(ms / 1000).toFixed(2)} s`
+export const fmtMs = (ms: number) => !Number.isFinite(ms) ? '—' : ms === 0 ? '0 ms' : ms < 0.01 ? `${(ms * 1000).toFixed(1)} µs` : ms < 10 ? `${ms.toFixed(2)} ms` : ms < 1000 ? `${ms.toFixed(0)} ms` : `${(ms / 1000).toFixed(2)} s`
 export const signed = (n: number, f: (n: number) => string) => (n > 0 ? '+' : n < 0 ? '−' : '') + f(Math.abs(n))
 
 // ---------- Theme ----------

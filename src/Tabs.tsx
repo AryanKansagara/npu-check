@@ -481,7 +481,7 @@ function HistoryTab({ project, version, update }: TabProps) {
           <div className="grid-2 top">
             <table className="compact-table">
               <thead><tr><th>Metric</th><th className="num">{va.label}</th><th className="num">{vb.label}</th></tr></thead>
-              <tbody>{d.metrics.map(m => <tr key={m.key}><td>{m.label}</td><td className="num">{fmt(m.key, m.a)}</td><td className={`num ${m.better === true ? 'diff-up' : m.better === false ? 'diff-down' : ''}`}>{fmt(m.key, m.b)}</td></tr>)}</tbody>
+              <tbody>{d.metrics.map(m => <tr key={m.key}><td>{m.label}</td><td className="num">{fmt(m.key, m.a)}</td><td className={`num ${m.better === true ? 'diff-down' : m.better === false ? 'diff-up' : ''}`}>{fmt(m.key, m.b)}</td></tr>)}</tbody>
             </table>
             <div className="stack-sm">
               <h3>Op changes</h3>
