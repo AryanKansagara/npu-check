@@ -7,6 +7,7 @@ import { buildGguf, NeedMoreBytes, parseGguf } from './gguf.ts'
 import { parseModel, detectFormat } from './load.ts'
 import { analyze, compare, DEVICES, inferShapes, opReportCsv, suggestPin, summarize, topoOrder, type FixId } from './analyze.ts'
 import { cnnClassifier, detector, transformerBlock } from './samples.ts'
+import { layoutGraph } from './layout.ts'
 
 const dev = DEVICES[0]
 const run = (bytes: Uint8Array, applied: FixId[] = [], pins: Record<string, number> = {}, device = dev) => analyze(parseOnnx(bytes), { pins, applied, device })
@@ -148,6 +149,16 @@ test('detector: unsupported ops create 5 partitions; each fix lowers the count',
   assert.equal(s.partitions, 1)
   assert.equal(s.cpuNodes, 0)
   assert.ok(s.latency.totalMs < r.latency.totalMs && r.latency.totalMs < base.latency.totalMs)
+})
+
+test('detector v2 (rewritten) is one NPU partition and compares as an improvement', () => {
+  const v1 = run(detector()), v2 = run(detector(true))
+  assert.equal(v2.partitions, 1)
+  assert.equal(v2.cpuNodes, 0)
+  assert.equal(v2.macs, v1.macs)
+  const d = compare(summarize(v1), summarize(v2))
+  assert.ok(d.ops.some(o => o.op === 'Einsum' && o.a === 1 && o.b === 0))
+  assert.ok(d.metrics.find(m => m.key === 'score')!.better)
 })
 
 test('Einsum shape and MACs come from the equation', () => {
@@ -321,4 +332,15 @@ test('suggested pins: batch 1, sequence 128, image 224', () => {
   assert.equal(suggestPin('sequence_length'), 128)
   assert.equal(suggestPin('height'), 224)
   assert.equal(suggestPin('unk__42'), 1)
+})
+
+test('graph layout: every edge goes to a later layer and no two nodes overlap', () => {
+  const ir = parseOnnx(detector())
+  const l = layoutGraph(ir, { dir: 'LR' })
+  assert.equal(l.nodes.length, ir.nodes.length)
+  const by = new Map(l.nodes.map(n => [n.index, n]))
+  for (const e of l.edges) assert.ok(by.get(e.to)!.layer > by.get(e.from)!.layer)
+  assert.equal(new Set(l.nodes.map(n => `${n.x},${n.y}`)).size, l.nodes.length)
+  // The two head branches (boxes and scores) sit side by side in one layer.
+  assert.equal(by.get(ir.nodes.findIndex(n => n.name === 'boxes_raw'))!.layer, by.get(ir.nodes.findIndex(n => n.name === 'scores_raw'))!.layer)
 })

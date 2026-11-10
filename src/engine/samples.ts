@@ -1,7 +1,7 @@
 // Synthetic ONNX models built from scratch (random weights, no real training). Labelled synthetic everywhere.
 import { buildOnnx, type BuildGraph, type BuildTensor } from './onnx.ts'
 
-export interface SampleDef { id: string; name: string; file: string; blurb: string; build: () => Uint8Array }
+export interface SampleDef { id: string; name: string; file: string; blurb: string; build: () => Uint8Array; v2?: { file: string; build: () => Uint8Array } }
 
 function rng(seed: number) {
   let s = seed >>> 0
@@ -88,7 +88,7 @@ export function transformerBlock(): Uint8Array {
   return buildOnnx(g)
 }
 
-export function detector(): Uint8Array {
+export function detector(fixed = false): Uint8Array {
   const g: BuildGraph = {
     name: 'tiny_detector_with_unsupported_ops', producer: 'npu-check synthetic', opset: 17, meta: { synthetic: 'true', note: 'Random weights; Einsum, Mod and NonMaxSuppression included on purpose.' },
     inputs: [{ name: 'image', dtype: 'fp32', shape: [1, 3, 128, 128] }],
@@ -127,11 +127,26 @@ export function detector(): Uint8Array {
       { op: 'Gather', name: 'gather_boxes', inputs: ['bf', 'idx'], outputs: ['detections'], attrs: { axis: 0 } },
     ],
   }
+  if (fixed) {
+    // v2: Einsum rewritten as MatMul on transposed tokens, grid precomputed as a constant, NMS cut out to the app.
+    g.name = 'tiny_detector_v2'
+    g.inits.push({ name: 'grid_const', dtype: 'fp32', dims: [1, 256, 1], data: Array.from({ length: 256 }, (_, i) => i % 16) })
+    const keep = g.nodes.filter(n => !['channel_mix', 'grid_x', 'grid_float', 'grid_bcast', 'nms', 'sel_index', 'boxes_flat', 'gather_boxes'].includes(n.name!))
+    const at = keep.findIndex(n => n.name === 'to_map')
+    keep.splice(at, 0,
+      { op: 'Transpose', name: 'tok_t', inputs: ['tok'], outputs: ['tokt'], attrs: { perm: [0, 2, 1] } },
+      { op: 'MatMul', name: 'channel_mix', inputs: ['tokt', 'mix.w'], outputs: ['mixt'] },
+      { op: 'Transpose', name: 'mix_back', inputs: ['mixt'], outputs: ['mixed'], attrs: { perm: [0, 2, 1] } })
+    keep.find(n => n.name === 'decode_boxes')!.inputs = ['br', 'grid_const']
+    g.nodes = keep
+    g.outputs = [{ name: 'boxes', dtype: 'fp32', shape: [1, 256, 4] }, { name: 'sct', dtype: 'fp32', shape: [1, 2, 256] }]
+    g.meta = { synthetic: 'true', note: 'v2: NPU-friendly rewrite of the synthetic detector; NMS runs in the app.' }
+  }
   return buildOnnx(g)
 }
 
 export const SAMPLES: SampleDef[] = [
-  { id: 'detector', name: 'Detector with unsupported ops', file: 'synthetic_detector.onnx', blurb: 'Einsum, Mod and NMS split the graph into five partitions.', build: detector },
+  { id: 'detector', name: 'Detector with unsupported ops', file: 'synthetic_detector.onnx', blurb: 'Einsum, Mod and NMS split the graph into five partitions.', build: () => detector(), v2: { file: 'synthetic_detector_v2.onnx', build: () => detector(true) } },
   { id: 'transformer', name: 'Transformer block, dynamic sequence', file: 'synthetic_transformer_block.onnx', blurb: 'Symbolic batch and seq dims push every node to the CPU until pinned.', build: transformerBlock },
   { id: 'cnn', name: 'Tiny CNN classifier', file: 'synthetic_cnn.onnx', blurb: 'Fully supported fp32 graph; the remaining win is int8 QDQ.', build: cnnClassifier },
 ]
