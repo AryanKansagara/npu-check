@@ -121,12 +121,14 @@ export function inferShapes(ir: ModelIR, pins?: Record<string, number>, order = 
   // Shape-valued tensors computed in the graph (Shape -> Gather -> Concat -> Reshape) are tracked so Reshape targets resolve.
   const V: Record<string, Dim[]> = {}
   const val = (n: string): Dim[] | undefined => ir.tensors[n]?.values ?? V[n]
+  const declared = (o: string) => { const d = ir.tensors[o]?.shape; return !!d && !d.includes('?') }
   for (const i of order) {
     const n = ir.nodes[i]
     const ins = n.inputs.map(x => x ? S[x] ?? null : null)
-    if (!n.outputs.every(o => !o || ir.tensors[o]?.shape)) {
+    if (!n.outputs.every(o => !o || declared(o))) {
       const out = inferNode(n, ins, val, S)
-      n.outputs.forEach((o, k) => { if (o && !(ir.tensors[o]?.shape)) S[o] = out[k] ?? null })
+      // A declared shape with unknown dims is kept only when inference cannot do better.
+      n.outputs.forEach((o, k) => { if (o && !declared(o)) S[o] = out[k] ?? S[o] ?? null })
     }
     const v = foldValue(n, ins, val)
     if (v && v.length <= 64 && n.outputs[0]) V[n.outputs[0]] = v
@@ -734,7 +736,7 @@ function findings(ir: ModelIR, a: Analysis, opts: Options, pins: Record<string, 
     const r = rule(op, ir.nodes.find(n => n.op === op)?.domain ?? '')
     f.push({ id: `op-${op}`, severity: r.post ? 'warn' : 'blocker', title: `${op} runs on the CPU (${names.length} node${names.length > 1 ? 's' : ''})`, detail: `${r.note}${r.replace ? ` Fix: ${r.replace}` : ''}${r.post ? ' This is post-processing: cut the graph before it and run it on the CPU once per frame.' : ''}`, nodes: names, fix: r.post ? 'split-post' : r.replace ? 'replace-ops' : undefined })
   }
-  const constrainedFail = a.nodes.filter(n => n.status === 'cpu' && n.support === 'constrained' && !n.reason.startsWith('Dynamic') && !n.reason.includes('data-dependent'))
+  const constrainedFail = a.nodes.filter(n => n.status === 'cpu' && n.support === 'constrained' && n.op !== 'Shape' && !n.reason.startsWith('Dynamic') && !n.reason.includes('data-dependent'))
   if (constrainedFail.length) f.push({ id: 'constraints', severity: 'warn', title: `${constrainedFail.length} supported op${constrainedFail.length > 1 ? 's' : ''} outside their constraints`, detail: [...new Set(constrainedFail.map(n => `${n.op}: ${n.reason}`))].join(' '), nodes: constrainedFail.map(n => n.name) })
   if (a.partitions > 1) f.push({ id: 'partitions', severity: a.switches > 2 ? 'blocker' : 'warn', title: `${a.partitions} partitions, ${a.switches} CPU/NPU switch${a.switches === 1 ? '' : 'es'}`, detail: `Each hand-off copies activations through shared memory and adds about ${opts.device.switchMs} ms on ${opts.device.name}. Estimated cost: ${a.latency.switchMs.toFixed(2)} ms per inference.` })
   if (a.quant.verdict === 'float' && !applied.has('quantize-int8')) f.push({ id: 'float', severity: 'warn', title: 'Float model: no QDQ quantization', detail: `${fmtBytes(a.weightBytes)} of float weights. The NPU runs fp32 graphs at fp16 at best (half the int8 rate) and some delegates refuse fp32 outright. Quantize to int8 QDQ with 100 to 500 calibration samples from real inputs; keep LayerNorm and Softmax at int16 or fp16 if accuracy drops.`, fix: 'quantize-int8' })

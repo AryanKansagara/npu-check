@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { analyze, summarize, symbols, suggestPin, type Analysis } from './engine/analyze.ts'
+import { analyze, defaultPin, summarize, symbols, type Analysis } from './engine/analyze.ts'
 import { NeedMoreBytes } from './engine/gguf.ts'
 import { parseModel } from './engine/load.ts'
 import { SAMPLES } from './engine/samples.ts'
@@ -32,7 +32,7 @@ export async function createSampleProject(sampleId: string): Promise<Project> {
   const now = Date.now()
   const settings = blankSettings()
   const ir = sampleIr(def.file)!
-  settings.pins = Object.fromEntries(symbols(ir).map(s => [s, s === 'seq' ? getDefaults().seqLen : suggestPin(s)]))
+  settings.pins = Object.fromEntries(symbols(ir).map(s => [s, s === 'seq' ? getDefaults().seqLen : defaultPin(ir, s)]))
   const versions: Version[] = [{ ...makeVersion(ir, def.file, 'v1 export', { settings }), createdAt: now - 86400000 * 9 }]
   if (def.v2) versions.push({ ...makeVersion(sampleIr(def.v2.file)!, def.v2.file, 'v2 NPU rewrite', { settings }), createdAt: now - 86400000 * 2 })
   return saveProject({ id: uuid(), name: `${def.name} (synthetic)`, createdAt: now, updatedAt: now, versions, currentId: versions[0].id, settings, sampleId })

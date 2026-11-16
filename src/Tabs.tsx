@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { analyze, compare, FIX_LABELS, fmtBytes, nodeReportCsv, opReportCsv, summarize, type Analysis, type DeviceProfile, type FixId } from './engine/analyze.ts'
+import { analyze, compare, FIX_LABELS, fmtBytes, nodeReportCsv, opReportCsv, summarize, type Analysis, type DeviceProfile, type FixId, defaultPin } from './engine/analyze.ts'
 import { pinDims } from './engine/onnx.ts'
 import { rule, TABLE_DATE } from './engine/support.ts'
 import type { Dim, ModelIR } from './engine/types.ts'
@@ -31,11 +31,11 @@ function Overview({ project, version, ir, a, base, update, setApplied }: TabProp
     <div className="stack">
       <div className="kpis">
         <div className="kpi"><small>Readiness</small><b>{a.score}<span className="unit">/100</span></b>{delta(a.score, base.score, String)}<p>{a.score >= 85 ? 'Ready to convert' : a.score >= 60 ? 'Converts with fallbacks' : 'Needs work before converting'}</p></div>
-        <div className="kpi"><small>{llm ? 'Decode speed' : 'Est. latency'}</small><b>{llm ? `${a.latency.tokensPerSec!.toFixed(1)}` : fmtMs(a.latency.totalMs)}{llm && <span className="unit"> tok/s</span>}</b>{!llm && delta(a.latency.totalMs, base.latency.totalMs, fmtMs)}<p>{project.settings.device.name}</p></div>
+        <div className="kpi"><small>{llm ? (llm.encoder ? 'One pass' : 'Decode speed') : 'Est. latency'}</small><b>{a.latency.tokensPerSec ? `${a.latency.tokensPerSec.toFixed(1)}` : fmtMs(a.latency.totalMs)}{!!a.latency.tokensPerSec && <span className="unit"> tok/s</span>}</b>{!llm && delta(a.latency.totalMs, base.latency.totalMs, fmtMs)}<p>{project.settings.device.name}</p></div>
         {!llm && <div className="kpi"><small>Partitions</small><b>{a.partitions}</b>{delta(a.partitions, base.partitions, String)}<p>{a.switches} CPU/NPU switch{a.switches === 1 ? '' : 'es'}</p></div>}
         {!llm && <div className="kpi"><small>On the NPU</small><b>{fmtN(a.npuNodes)}<span className="unit">/{fmtN(a.npuNodes + a.cpuNodes)}</span></b><p>{a.cpuNodes} node{a.cpuNodes === 1 ? '' : 's'} on CPU</p></div>}
         <div className="kpi"><small>Parameters</small><b>{fmtSi(a.params)}</b><p>{fmtBytes(a.weightBytes)} of weights</p></div>
-        {llm ? <div className="kpi"><small>KV cache</small><b>{a.latency.kvCacheBytes ? fmtBytes(a.latency.kvCacheBytes) : '—'}</b><p>fp16, 4096 tokens</p></div>
+        {llm ? <div className="kpi"><small>KV cache</small><b>{a.latency.kvCacheBytes ? fmtBytes(a.latency.kvCacheBytes) : '—'}</b><p>{llm.encoder ? 'Encoder: no cache' : 'fp16, up to 4096 tokens'}</p></div>
           : <div className="kpi"><small>Peak activations</small><b>{fmtBytes(a.peakBytes)}</b><p>{fmtSi(a.macs)} MACs</p></div>}
       </div>
 
@@ -70,7 +70,7 @@ function Overview({ project, version, ir, a, base, update, setApplied }: TabProp
                 <div><dt>Layers / width</dt><dd>{llm.blockCount ?? '—'} blocks · {llm.embeddingLength ?? '—'} wide · {llm.headCount ?? '—'} heads ({llm.headCountKv ?? llm.headCount ?? '—'} KV)</dd></div>
                 <div><dt>Context</dt><dd>{llm.contextLength ? fmtN(llm.contextLength) : '—'} tokens</dd></div>
                 <div><dt>File type</dt><dd>{llm.fileType ?? '—'}</dd></div>
-                <div><dt>Prefill (512 tok)</dt><dd>{fmtMs(a.latency.prefillMs!)} if compute-bound on the NPU</dd></div>
+                <div><dt>{llm.encoder ? 'Full pass' : 'Prefill (512 tok)'}</dt><dd>{fmtMs(a.latency.prefillMs ?? 0)} if compute-bound on the NPU</dd></div>
               </> : <>
                 <div><dt>Nodes</dt><dd>{fmtN(a.nodeCount)} · {a.opRows.length} op types</dd></div>
                 <div><dt>Quantization</dt><dd>{QV[a.quant.verdict]}{a.quant.qdq ? ` · ${a.quant.qdq} Q/DQ nodes` : ''}</dd></div>
@@ -331,13 +331,13 @@ function FixArtifact({ f, project, version, ir, a, update }: { f: FixId; project
   const file = version.fileName
   const out = file.replace(/\.onnx$/i, '')
   if (f === 'pin-dims') {
-    const pins = Object.fromEntries(a.symbols.map(s => [s, project.settings.pins[s] ?? 1]))
+    const pins = Object.fromEntries(a.symbols.map(s => [s, project.settings.pins[s] ?? defaultPin(ir, s)]))
     const cmd = Object.entries(pins).filter(([s]) => s !== '?').map(([s, v]) => `python -m onnxruntime.tools.make_dynamic_shape_fixed --dim_param ${s} --dim_value ${v} ${file} ${out}_static.onnx`).join('\n')
     return (
       <div className="stack-sm">
         <div className="inline-fields">
-          {a.symbols.filter(s => s !== '?').map(s => (
-            <label key={s} className="field"><span>{s}</span><input type="number" min={1} value={pins[s]} onChange={e => { const v = Math.max(1, Math.round(Number(e.target.value) || 1)); update({ settings: { ...project.settings, pins: { ...project.settings.pins, [s]: v } } }) }} /></label>
+          {a.symbols.map(s => (
+            <label key={s} className="field"><span>{s === '?' ? 'unnamed dims' : s}</span><input type="number" min={1} value={pins[s]} onChange={e => { const v = Math.max(1, Math.round(Number(e.target.value) || 1)); update({ settings: { ...project.settings, pins: { ...project.settings.pins, [s]: v } } }) }} /></label>
           ))}
         </div>
         {ir.format === 'onnx' && <PinnedDownload project={project} version={version} pins={pins} />}

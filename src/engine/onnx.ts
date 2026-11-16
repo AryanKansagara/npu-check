@@ -241,7 +241,8 @@ function encTensor(t: BuildTensor): Writer {
 
 function encValue(v: BuildValue): Writer {
   const shape = new Writer()
-  for (const d of v.shape) shape.msg(1, typeof d === 'number' ? new Writer().int(1, d) : new Writer().str(2, d))
+  // '?' is written as a dim with neither value nor name, the way exporters leave unknown dims.
+  for (const d of v.shape) shape.msg(1, typeof d === 'number' ? new Writer().int(1, d) : d === '?' ? new Writer() : new Writer().str(2, d))
   const tt = new Writer().int(1, ONNX_DTYPE_CODE[v.dtype] ?? 1).msg(2, shape)
   return new Writer().str(1, v.name).msg(2, new Writer().msg(1, tt))
 }

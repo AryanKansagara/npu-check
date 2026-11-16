@@ -23,7 +23,7 @@ export default function Report({ id }: { id: string }) {
       </header>
       <div className="kpis">
         <div className="kpi"><small>Readiness</small><b>{a.score}/100</b></div>
-        <div className="kpi"><small>Est. latency</small><b>{ir.llm ? `${a.latency.tokensPerSec!.toFixed(1)} tok/s` : fmtMs(a.latency.totalMs)}</b></div>
+        <div className="kpi"><small>Est. latency</small><b>{a.latency.tokensPerSec ? `${a.latency.tokensPerSec.toFixed(1)} tok/s` : fmtMs(a.latency.totalMs)}</b></div>
         <div className="kpi"><small>Partitions</small><b>{a.partitions}</b><p>{a.switches} switches</p></div>
         <div className="kpi"><small>Parameters</small><b>{fmtSi(a.params)}</b><p>{fmtBytes(a.weightBytes)}</p></div>
         <div className="kpi"><small>MACs</small><b>{fmtSi(a.macs)}</b></div>

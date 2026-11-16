@@ -147,6 +147,14 @@ export function detector(fixed = false): Uint8Array {
   return buildOnnx(g)
 }
 
+/** Real public models served from /samples, unmodified. Loaded through the normal import path. */
+export const REAL_SAMPLES = [
+  { file: 'mnist-12.onnx', name: 'MNIST-12 (ONNX)', what: 'CNTK digit classifier, 12 nodes, fp32', source: 'ONNX Model Zoo', url: 'https://github.com/onnx/models/tree/main/validated/vision/classification/mnist', licence: 'MIT' },
+  { file: 'mobilenet_v2_w8a8.onnx', name: 'MobileNet-v2 w8a8 (ONNX, QDQ)', what: 'Qualcomm AI Hub export, graph only: weights sit in an external .data file', source: 'Qualcomm AI Hub Models v0.66.0', url: 'https://huggingface.co/qualcomm/MobileNet-v2', licence: 'Apache-2.0' },
+  { file: 'face_detection_short_range.tflite', name: 'BlazeFace short-range (TFLite)', what: 'MediaPipe face detector, fp16 weights', source: 'MediaPipe', url: 'https://ai.google.dev/edge/mediapipe/solutions/vision/face_detector', licence: 'Apache-2.0' },
+  { file: 'stories260K.gguf', name: 'TinyStories 260K (GGUF)', what: 'Llama-architecture toy LLM, F32', source: 'ggml-org/models (karpathy/tinyllamas)', url: 'https://huggingface.co/ggml-org/models/tree/main/tinyllamas', licence: 'MIT' },
+] as const
+
 export const SAMPLES: SampleDef[] = [
   { id: 'detector', name: 'Detector with unsupported ops', file: 'synthetic_detector.onnx', blurb: 'Einsum, Mod and NMS split the graph into five partitions.', build: () => detector(), v2: { file: 'synthetic_detector_v2.onnx', build: () => detector(true) } },
   { id: 'transformer', name: 'Transformer block, dynamic sequence', file: 'synthetic_transformer_block.onnx', blurb: 'Symbolic batch and seq dims push every node to the CPU until pinned.', build: transformerBlock },

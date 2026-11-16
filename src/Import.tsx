@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
-import { analyze, fmtBytes, suggestPin, symbols } from './engine/analyze.ts'
+import { analyze, defaultPin, fmtBytes, symbols } from './engine/analyze.ts'
+import { REAL_SAMPLES } from './engine/samples.ts'
 import type { ModelIR } from './engine/types.ts'
 import { addVersion, readModel } from './projectData.ts'
 import { getDefaults, type Project } from './store.ts'
@@ -25,12 +26,21 @@ export default function ImportTab({ project, first }: { project: Project; first:
     try {
       const ir = await readModel(file)
       const syms = symbols(ir)
-      setPins(Object.fromEntries(syms.map(s => [s, project.settings.pins[s] ?? (/seq|len|token/i.test(s) ? getDefaults().seqLen : suggestPin(s))])))
+      setPins(Object.fromEntries(syms.map(s => [s, project.settings.pins[s] ?? (/seq|len|token/i.test(s) ? getDefaults().seqLen : defaultPin(ir, s))])))
       setParsed({ file, ir, ms: performance.now() - t0 })
       setLabel(`v${project.versions.length + 1} ${file.name.replace(/\.[^.]+$/, '')}`)
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally { setBusy(null) }
+  }
+
+  const takeReal = async (name: string) => {
+    setErr(null); setBusy(`Fetching ${name}`)
+    try {
+      const res = await fetch(`/samples/${name}`)
+      if (!res.ok) throw new Error(`Could not fetch ${name} (${res.status}).`)
+      await take(new File([await res.blob()], name))
+    } catch (e) { setErr(e instanceof Error ? e.message : String(e)); setBusy(null) }
   }
 
   const save = async () => {
@@ -72,6 +82,15 @@ export default function ImportTab({ project, first }: { project: Project; first:
             <li><b>LLMs:</b> any <code>.gguf</code>; only the header is read, so multi-GB files are fine.</li>
           </ul>
           <Link href="/docs" className="btn ghost sm">Full export guides</Link>
+          <h3>No file to hand? Load a real public model</h3>
+          <div className="stack-sm">
+            {REAL_SAMPLES.map(s => (
+              <button key={s.file} type="button" className="sample-btn" disabled={!!busy} onClick={() => void takeReal(s.file)}>
+                <span><strong>{s.name}</strong><small>{s.what}. {s.source}, {s.licence}.</small></span><span aria-hidden="true">&rarr;</span>
+              </button>
+            ))}
+          </div>
+          <p className="muted small">Unmodified public files, fetched from this site and parsed in the tab like any other import. <Link href="/docs#samples">Sources and licences</Link>.</p>
         </div>
       </div>
 
@@ -97,7 +116,7 @@ export default function ImportTab({ project, first }: { project: Project; first:
               <p className="muted small">These inputs have symbolic dims. Values below are used for memory and latency estimates and for the pinned-shape fix. They do not change the file.</p>
               <div className="map-grid">
                 {Object.keys(pins).map(s => (
-                  <label key={s} className="field"><span className="mono">{s}</span>
+                  <label key={s} className="field"><span className="mono">{s === '?' ? 'unnamed dims' : s}</span>
                     <input type="number" min={1} value={pins[s]} onChange={e => setPins({ ...pins, [s]: Math.max(1, Math.round(Number(e.target.value) || 1)) })} />
                     <small className="muted">in {preview.inputs.filter(i => i.dynamic.includes(s)).map(i => i.name).join(', ')}</small>
                   </label>
