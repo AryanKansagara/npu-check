@@ -751,7 +751,7 @@ function findings(ir: ModelIR, a: Analysis, opts: Options, pins: Record<string, 
   const big = a.nodes.filter(n => n.status === 'npu').map(n => ({ n, b: numel(n.outShape, pins) * (a.quant.precision === 'int8' ? 1 : 2) })).filter(x => x.b > vtcm)
   if (big.length) f.push({ id: 'activations', severity: 'warn', title: `${big.length} activation${big.length > 1 ? 's' : ''} larger than ${opts.device.vtcmMB} MB of NPU scratch`, detail: `Largest: ${big.sort((x, y) => y.b - x.b)[0].n.name} at ${fmtBytes(big[0].b)}. Tensors that do not fit spill to DRAM and become bandwidth-bound; tile the input or reduce resolution.`, nodes: big.map(x => x.n.name) })
   if (a.opset !== null && a.opset < 13) f.push({ id: 'opset', severity: 'info', title: `Old opset ${a.opset}`, detail: 'Converters are tested most against opset 13 to 20. Re-export with opset_version=17 to avoid legacy op semantics.' })
-  if (a.externalBytes) f.push({ id: 'external', severity: 'info', title: `${fmtBytes(a.externalBytes)} of weights in external data`, detail: 'Normal for models above 2 GB. Keep the .data file next to the .onnx when converting; it is not needed for this inspection.' })
+  if (a.externalBytes) f.push({ id: 'external', severity: 'info', title: `${fmtBytes(a.externalBytes)} of weights in external data`, detail: 'Required above 2 GB and common for smaller exports too. Keep the .data file next to the .onnx when converting; it is not needed for this inspection.' })
   for (const i of ir.issues.filter(x => x.level === 'error').slice(0, 5)) f.push({ id: `issue-${i.where}`, severity: 'warn', title: `Graph issue at ${i.where}`, detail: i.message })
   return f
 }

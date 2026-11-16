@@ -284,7 +284,7 @@ export function Footer() {
         <div className="footer-brand"><Monogram /> <strong>NPU Check</strong></div>
         <nav className="footer-nav" aria-label="Footer"><Link href="/app">Projects</Link><Link href="/docs">Docs</Link><Link href="/settings">Settings</Link></nav>
         <p>Built by Aryan Kansagara. Independent project, not affiliated with Qualcomm.</p>
-        <p className="muted small">Sample models are synthetic (random weights). Model files are parsed in your browser and never uploaded; signing in syncs only derived reports.</p>
+        <p className="muted small">Workspace samples are synthetic (random weights); the public models on the import screen are real and credited in Docs. Model files are parsed in your browser and never uploaded; signing in syncs only derived reports.</p>
       </div>
     </footer>
   )

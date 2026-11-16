@@ -62,7 +62,7 @@ export default function Workspace() {
               <button type="button" className="btn primary" onClick={newProject}>Import your model</button>
               <Link href="/docs" className="btn ghost">Export guides</Link>
             </div>
-            <p className="muted small">Files are parsed in your browser and never uploaded.</p>
+            <p className="muted small">Files are parsed in your browser and never uploaded. No file to hand? The import screen can load four real public models (ONNX, TFLite, GGUF).</p>
           </article>
         </div>
       ) : (

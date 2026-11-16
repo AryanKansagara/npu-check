@@ -607,3 +607,19 @@ tr.current td { background: var(--accent-subtle); }
 @media print {
   .report table { font-size: 11px; }
 }
+
+/* Narrow screens: long version labels, wide tables and the docs contents list must not widen the page. */
+select { max-width: 100%; min-width: 0; }
+.grid-2 > * { min-width: 0; }
+.grid-2 > .panel { overflow-x: auto; }
+.panel h3 { margin-top: 18px; }
+.docs table { display: block; overflow-x: auto; }
+@media (max-width: 720px) {
+  .docs-grid { grid-template-columns: minmax(0, 1fr); }
+  .docs-grid .toc { display: flex; flex-wrap: wrap; }
+}
+.proj-head > .grow { min-width: 0; max-width: 100%; }
+.proj-head select { text-overflow: ellipsis; }
+.fix-card { grid-template-columns: auto minmax(0, 1fr) auto; }
+.fix-card > * { min-width: 0; }
+@media (max-width: 720px) { .fix-card { grid-template-columns: minmax(0, 1fr); } }
