@@ -96,7 +96,7 @@ export function detector(fixed = false): Uint8Array {
     inits: [
       w('b1.w', [16, 3, 3, 3], 21), w('b2.w', [32, 16, 3, 3], 22), w('b3.w', [64, 32, 3, 3], 23), w('mix.w', [64, 64], 24),
       w('head.w', [6, 64, 1, 1], 25), i64('flat_shape', [1, 64, 256]), i64('map_shape', [1, 64, 16, 16]), i64('head_shape', [1, 6, 256]),
-      i64('s0', [0]), i64('s4', [4]), i64('s6', [6]), i64('ax2', [2]), { name: 'cell_idx', dtype: 'int64', dims: [256], data: Array.from({ length: 256 }, (_, i) => i) },
+      i64('s0', [0]), i64('s4', [4]), i64('s6', [6]), i64('ax2', [2]),
       i64('grid_w', [16], []), i64('grid_shape', [1, 256, 1]), i64('box_flat', [-1, 4]),
       i64('max_out', [100]), f32('iou', [0.5]), f32('score_th', [0.25]), i64('col', [2], []),
     ],
@@ -117,6 +117,8 @@ export function detector(fixed = false): Uint8Array {
       { op: 'Slice', name: 'scores_raw', inputs: ['ht', 's4', 's6', 'ax2'], outputs: ['sr'] },
       { op: 'Sigmoid', name: 'scores_sig', inputs: ['sr'], outputs: ['sc'] },
       { op: 'Transpose', name: 'scores_t', inputs: ['sc'], outputs: ['sct'], attrs: { perm: [0, 2, 1] } },
+      // The offset index is computed at runtime, so Mod cannot be constant-folded.
+      { op: 'ArgMax', name: 'cell_argmax', inputs: ['sr'], outputs: ['cell_idx'], attrs: { axis: 2, keepdims: 0 } },
       { op: 'Mod', name: 'grid_x', inputs: ['cell_idx', 'grid_w'], outputs: ['gx'] },
       { op: 'Cast', name: 'grid_float', inputs: ['gx'], outputs: ['gf'], attrs: { to: 1 } },
       { op: 'Reshape', name: 'grid_bcast', inputs: ['gf', 'grid_shape'], outputs: ['gb'] },
@@ -131,7 +133,7 @@ export function detector(fixed = false): Uint8Array {
     // v2: Einsum rewritten as MatMul on transposed tokens, grid precomputed as a constant, NMS cut out to the app.
     g.name = 'tiny_detector_v2'
     g.inits.push({ name: 'grid_const', dtype: 'fp32', dims: [1, 256, 1], data: Array.from({ length: 256 }, (_, i) => i % 16) })
-    const keep = g.nodes.filter(n => !['channel_mix', 'grid_x', 'grid_float', 'grid_bcast', 'nms', 'sel_index', 'boxes_flat', 'gather_boxes'].includes(n.name!))
+    const keep = g.nodes.filter(n => !['channel_mix', 'cell_argmax', 'grid_x', 'grid_float', 'grid_bcast', 'nms', 'sel_index', 'boxes_flat', 'gather_boxes'].includes(n.name!))
     const at = keep.findIndex(n => n.name === 'to_map')
     keep.splice(at, 0,
       { op: 'Transpose', name: 'tok_t', inputs: ['tok'], outputs: ['tokt'], attrs: { perm: [0, 2, 1] } },

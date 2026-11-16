@@ -4,30 +4,50 @@ import type { Dim, DType, Issue, ModelIR, ModelNode, TensorInfo } from './types.
 
 const TFL_DTYPES: Record<number, DType> = {
   0: 'fp32', 1: 'fp16', 2: 'int32', 3: 'uint8', 4: 'int64', 5: 'string', 6: 'bool', 7: 'int16', 8: 'complex', 9: 'int8',
-  10: 'fp64', 11: 'complex', 12: 'uint64', 15: 'uint32', 16: 'uint16', 17: 'int4',
+  10: 'fp64', 11: 'complex', 12: 'uint64', 15: 'uint32', 16: 'uint16', 17: 'int4', 18: 'bf16', 20: 'uint4', 21: 'fp8', 22: 'fp8',
 }
 
-// BuiltinOperator enum values we name explicitly, mapped to the ONNX op the support table knows.
-const BUILTIN: Record<number, [string, string]> = {
-  0: ['ADD', 'Add'], 1: ['AVERAGE_POOL_2D', 'AveragePool'], 2: ['CONCATENATION', 'Concat'], 3: ['CONV_2D', 'Conv'],
-  4: ['DEPTHWISE_CONV_2D', 'Conv'], 5: ['DEPTH_TO_SPACE', 'DepthToSpace'], 6: ['DEQUANTIZE', 'DequantizeLinear'],
-  7: ['EMBEDDING_LOOKUP', 'Gather'], 8: ['FLOOR', 'Floor'], 9: ['FULLY_CONNECTED', 'Gemm'], 11: ['L2_NORMALIZATION', 'LpNormalization'],
-  14: ['LOGISTIC', 'Sigmoid'], 16: ['LSTM', 'LSTM'], 17: ['MAX_POOL_2D', 'MaxPool'], 18: ['MUL', 'Mul'], 19: ['RELU', 'Relu'],
-  21: ['RELU6', 'Clip'], 22: ['RESHAPE', 'Reshape'], 23: ['RESIZE_BILINEAR', 'Resize'], 25: ['SOFTMAX', 'Softmax'],
-  26: ['SPACE_TO_DEPTH', 'SpaceToDepth'], 28: ['TANH', 'Tanh'], 32: ['CUSTOM', 'Custom'], 34: ['PAD', 'Pad'], 36: ['GATHER', 'Gather'],
-  39: ['TRANSPOSE', 'Transpose'], 40: ['MEAN', 'ReduceMean'], 41: ['SUB', 'Sub'], 42: ['DIV', 'Div'], 43: ['SQUEEZE', 'Squeeze'],
-  44: ['UNIDIRECTIONAL_SEQUENCE_LSTM', 'LSTM'], 45: ['STRIDED_SLICE', 'Slice'], 47: ['EXP', 'Exp'], 48: ['TOPK_V2', 'TopK'],
-  49: ['SPLIT', 'Split'], 50: ['LOG_SOFTMAX', 'LogSoftmax'], 53: ['CAST', 'Cast'], 54: ['PRELU', 'PRelu'], 55: ['MAXIMUM', 'Max'],
-  56: ['ARG_MAX', 'ArgMax'], 57: ['MINIMUM', 'Min'], 59: ['NEG', 'Neg'], 61: ['GREATER', 'Greater'], 64: ['SELECT', 'Where'],
-  65: ['SLICE', 'Slice'], 66: ['SIN', 'Sin'], 67: ['TRANSPOSE_CONV', 'ConvTranspose'], 69: ['TILE', 'Tile'], 70: ['EXPAND_DIMS', 'Unsqueeze'],
-  71: ['EQUAL', 'Equal'], 73: ['LOG', 'Log'], 74: ['SUM', 'ReduceSum'], 75: ['SQRT', 'Sqrt'], 76: ['RSQRT', 'Rsqrt'], 77: ['SHAPE', 'Shape'],
-  78: ['POW', 'Pow'], 82: ['REDUCE_MAX', 'ReduceMax'], 83: ['PACK', 'Concat'], 85: ['ONE_HOT', 'OneHot'], 88: ['UNPACK', 'Split'],
-  92: ['SQUARE', 'Mul'], 94: ['FILL', 'Expand'], 96: ['RANGE', 'Range'], 97: ['RESIZE_NEAREST_NEIGHBOR', 'Resize'], 98: ['LEAKY_RELU', 'LeakyRelu'],
-  99: ['SQUARED_DIFFERENCE', 'Sub'], 100: ['MIRROR_PAD', 'Pad'], 101: ['ABS', 'Abs'], 102: ['SPLIT_V', 'Split'], 103: ['UNIQUE', 'Unique'],
-  107: ['GATHER_ND', 'GatherND'], 108: ['COS', 'Cos'], 109: ['WHERE', 'NonZero'], 111: ['ELU', 'Elu'], 114: ['QUANTIZE', 'QuantizeLinear'],
-  117: ['HARD_SWISH', 'HardSwish'], 118: ['IF', 'If'], 119: ['WHILE', 'Loop'], 120: ['NON_MAX_SUPPRESSION_V4', 'NonMaxSuppression'],
-  121: ['NON_MAX_SUPPRESSION_V5', 'NonMaxSuppression'], 122: ['SCATTER_ND', 'ScatterND'], 123: ['SELECT_V2', 'Where'],
-  126: ['BATCH_MATMUL', 'MatMul'], 150: ['GELU', 'Gelu'],
+// BuiltinOperator names indexed by enum value (tensorflow/compiler/mlir/lite/schema/schema.fbs, checked 2026-11-15).
+export const TFL_NAMES = `
+ADD AVERAGE_POOL_2D CONCATENATION CONV_2D DEPTHWISE_CONV_2D DEPTH_TO_SPACE DEQUANTIZE EMBEDDING_LOOKUP FLOOR FULLY_CONNECTED HASHTABLE_LOOKUP
+L2_NORMALIZATION L2_POOL_2D LOCAL_RESPONSE_NORMALIZATION LOGISTIC LSH_PROJECTION LSTM MAX_POOL_2D MUL RELU RELU_N1_TO_1 RELU6 RESHAPE
+RESIZE_BILINEAR RNN SOFTMAX SPACE_TO_DEPTH SVDF TANH CONCAT_EMBEDDINGS SKIP_GRAM CALL CUSTOM EMBEDDING_LOOKUP_SPARSE PAD UNIDIRECTIONAL_SEQUENCE_RNN
+GATHER BATCH_TO_SPACE_ND SPACE_TO_BATCH_ND TRANSPOSE MEAN SUB DIV SQUEEZE UNIDIRECTIONAL_SEQUENCE_LSTM STRIDED_SLICE BIDIRECTIONAL_SEQUENCE_RNN
+EXP TOPK_V2 SPLIT LOG_SOFTMAX DELEGATE BIDIRECTIONAL_SEQUENCE_LSTM CAST PRELU MAXIMUM ARG_MAX MINIMUM LESS NEG PADV2 GREATER GREATER_EQUAL
+LESS_EQUAL SELECT SLICE SIN TRANSPOSE_CONV SPARSE_TO_DENSE TILE EXPAND_DIMS EQUAL NOT_EQUAL LOG SUM SQRT RSQRT SHAPE POW ARG_MIN FAKE_QUANT
+REDUCE_PROD REDUCE_MAX PACK LOGICAL_OR ONE_HOT LOGICAL_AND LOGICAL_NOT UNPACK REDUCE_MIN FLOOR_DIV REDUCE_ANY SQUARE ZEROS_LIKE FILL
+FLOOR_MOD RANGE RESIZE_NEAREST_NEIGHBOR LEAKY_RELU SQUARED_DIFFERENCE MIRROR_PAD ABS SPLIT_V UNIQUE CEIL REVERSE_V2 ADD_N GATHER_ND
+COS WHERE RANK ELU REVERSE_SEQUENCE MATRIX_DIAG QUANTIZE MATRIX_SET_DIAG ROUND HARD_SWISH IF WHILE NON_MAX_SUPPRESSION_V4 NON_MAX_SUPPRESSION_V5
+SCATTER_ND SELECT_V2 DENSIFY SEGMENT_SUM BATCH_MATMUL PLACEHOLDER_FOR_GREATER_OP_CODES CUMSUM CALL_ONCE BROADCAST_TO RFFT2D CONV_3D
+_ _ _ HASHTABLE HASHTABLE_FIND HASHTABLE_IMPORT HASHTABLE_SIZE REDUCE_ALL CONV_3D_TRANSPOSE VAR_HANDLE READ_VARIABLE ASSIGN_VARIABLE
+BROADCAST_ARGS RANDOM_STANDARD_NORMAL BUCKETIZE RANDOM_UNIFORM MULTINOMIAL GELU DYNAMIC_UPDATE_SLICE RELU_0_TO_1 UNSORTED_SEGMENT_PROD
+UNSORTED_SEGMENT_MAX UNSORTED_SEGMENT_SUM ATAN2 UNSORTED_SEGMENT_MIN SIGN BITCAST BITWISE_XOR RIGHT_SHIFT STABLEHLO_LOGISTIC STABLEHLO_ADD
+STABLEHLO_DIVIDE STABLEHLO_MULTIPLY STABLEHLO_MAXIMUM STABLEHLO_RESHAPE STABLEHLO_CLAMP STABLEHLO_CONCATENATE STABLEHLO_BROADCAST_IN_DIM
+STABLEHLO_CONVOLUTION STABLEHLO_SLICE STABLEHLO_CUSTOM_CALL STABLEHLO_REDUCE STABLEHLO_ABS STABLEHLO_AND STABLEHLO_COSINE STABLEHLO_EXPONENTIAL
+STABLEHLO_FLOOR STABLEHLO_LOG STABLEHLO_MINIMUM STABLEHLO_NEGATE STABLEHLO_OR STABLEHLO_POWER STABLEHLO_REMAINDER STABLEHLO_RSQRT STABLEHLO_SELECT
+STABLEHLO_SUBTRACT STABLEHLO_TANH STABLEHLO_SCATTER STABLEHLO_COMPARE STABLEHLO_CONVERT STABLEHLO_DYNAMIC_SLICE STABLEHLO_DYNAMIC_UPDATE_SLICE
+STABLEHLO_PAD STABLEHLO_IOTA STABLEHLO_DOT_GENERAL STABLEHLO_REDUCE_WINDOW STABLEHLO_SORT STABLEHLO_WHILE STABLEHLO_GATHER STABLEHLO_TRANSPOSE
+DILATE STABLEHLO_RNG_BIT_GENERATOR REDUCE_WINDOW STABLEHLO_COMPOSITE STABLEHLO_SHIFT_LEFT STABLEHLO_CBRT STABLEHLO_CASE
+`.trim().split(/\s+/)
+
+// TFLite builtins mapped to the ONNX op the support table knows. Anything else keeps its TFLite name.
+const TFL_TO_ONNX: Record<string, string> = {
+  ADD: 'Add', AVERAGE_POOL_2D: 'AveragePool', CONCATENATION: 'Concat', CONV_2D: 'Conv', DEPTHWISE_CONV_2D: 'Conv', DEPTH_TO_SPACE: 'DepthToSpace',
+  DEQUANTIZE: 'DequantizeLinear', EMBEDDING_LOOKUP: 'Gather', FLOOR: 'Floor', FULLY_CONNECTED: 'Gemm', L2_NORMALIZATION: 'LpNormalization',
+  LOGISTIC: 'Sigmoid', LSTM: 'LSTM', MAX_POOL_2D: 'MaxPool', MUL: 'Mul', RELU: 'Relu', RELU6: 'Clip', RESHAPE: 'Reshape', RESIZE_BILINEAR: 'Resize',
+  SOFTMAX: 'Softmax', SPACE_TO_DEPTH: 'SpaceToDepth', TANH: 'Tanh', PAD: 'Pad', GATHER: 'Gather', TRANSPOSE: 'Transpose', MEAN: 'ReduceMean',
+  SUB: 'Sub', DIV: 'Div', SQUEEZE: 'Squeeze', UNIDIRECTIONAL_SEQUENCE_LSTM: 'LSTM', STRIDED_SLICE: 'Slice', EXP: 'Exp', TOPK_V2: 'TopK',
+  SPLIT: 'Split', LOG_SOFTMAX: 'LogSoftmax', CAST: 'Cast', PRELU: 'PRelu', MAXIMUM: 'Max', ARG_MAX: 'ArgMax', MINIMUM: 'Min', NEG: 'Neg',
+  GREATER: 'Greater', SELECT: 'Where', SLICE: 'Slice', SIN: 'Sin', TRANSPOSE_CONV: 'ConvTranspose', TILE: 'Tile', EXPAND_DIMS: 'Unsqueeze',
+  EQUAL: 'Equal', LOG: 'Log', SUM: 'ReduceSum', SQRT: 'Sqrt', RSQRT: 'Rsqrt', SHAPE: 'Shape', POW: 'Pow', REDUCE_MAX: 'ReduceMax', PACK: 'Concat',
+  ONE_HOT: 'OneHot', UNPACK: 'Split', SQUARE: 'Mul', FILL: 'Expand', RANGE: 'Range', RESIZE_NEAREST_NEIGHBOR: 'Resize', LEAKY_RELU: 'LeakyRelu',
+  SQUARED_DIFFERENCE: 'Sub', MIRROR_PAD: 'Pad', ABS: 'Abs', SPLIT_V: 'Split', UNIQUE: 'Unique', GATHER_ND: 'GatherND', COS: 'Cos', WHERE: 'NonZero',
+  ELU: 'Elu', QUANTIZE: 'QuantizeLinear', HARD_SWISH: 'HardSwish', IF: 'If', WHILE: 'Loop', NON_MAX_SUPPRESSION_V4: 'NonMaxSuppression',
+  NON_MAX_SUPPRESSION_V5: 'NonMaxSuppression', SCATTER_ND: 'ScatterND', SELECT_V2: 'Where', BATCH_MATMUL: 'MatMul', GELU: 'Gelu', LOCAL_RESPONSE_NORMALIZATION: 'LRN',
+  RELU_N1_TO_1: 'Clip', RELU_0_TO_1: 'Clip', BIDIRECTIONAL_SEQUENCE_LSTM: 'LSTM', LESS: 'Less', PADV2: 'Pad', GREATER_EQUAL: 'GreaterOrEqual',
+  LESS_EQUAL: 'LessOrEqual', ARG_MIN: 'ArgMin', REDUCE_PROD: 'ReduceProd', LOGICAL_OR: 'Or', LOGICAL_AND: 'And', LOGICAL_NOT: 'Not', REDUCE_MIN: 'ReduceMin',
+  FLOOR_MOD: 'Mod', CEIL: 'Ceil', ADD_N: 'Sum', ROUND: 'Round', CUMSUM: 'CumSum', BROADCAST_TO: 'Expand', SIGN: 'Sign', CONV_3D: 'Conv',
+  FLOOR_DIV: 'Div', ZEROS_LIKE: 'ConstantOfShape',
 }
 
 class FB {
@@ -119,8 +139,12 @@ export function parseTflite(buf: Uint8Array): ModelIR {
   const nodes: ModelNode[] = fb.tables(sg, 3).map((o, i) => {
     const c = codes[fb.scalar(o, 0, 'u32')]
     if (!c) issues.push({ level: 'error', where: `operator ${i}`, message: 'opcode_index points past the operator_codes table.' })
-    const [tfl, op] = c?.code === 32 ? [`CUSTOM:${c.custom}`, c.custom || 'Custom'] : BUILTIN[c?.code ?? -1] ?? [`BUILTIN_${c?.code}`, `TFL_${c?.code}`]
-    const n: ModelNode = { name: `${tfl.toLowerCase()}_${i}`, op, domain: c?.code === 32 ? 'custom' : '', inputs: fb.i32s(o, 1).map(nameOf).filter(Boolean), outputs: fb.i32s(o, 2).map(nameOf), attrs: { tflite: tfl, layout: 'NHWC' } }
+    const builtin = TFL_NAMES[c?.code ?? -1] && TFL_NAMES[c?.code ?? -1] !== '_' ? TFL_NAMES[c!.code] : `BUILTIN_${c?.code}`
+    let [tfl, op] = c?.code === 32 ? [`CUSTOM:${c.custom}`, c.custom || 'Custom'] : [builtin, TFL_TO_ONNX[builtin] ?? builtin]
+    const inputs = fb.i32s(o, 1).map(nameOf).filter(Boolean)
+    // DEQUANTIZE on fp16 constants is how fp16-weight models expand weights to fp32; it is a cast, not QDQ.
+    if (tfl === 'DEQUANTIZE' && tensors[inputs[0]]?.dtype === 'fp16') op = 'Cast'
+    const n: ModelNode = { name: `${tfl.toLowerCase()}_${i}`, op, domain: c?.code === 32 ? 'custom' : '', inputs, outputs: fb.i32s(o, 2).map(nameOf), attrs: { tflite: tfl, layout: 'NHWC' } }
     if (tfl === 'DEPTHWISE_CONV_2D') n.attrs.depthwise = 1
     if (tfl === 'RELU6') { n.attrs.min = 0; n.attrs.max = 6 }
     return n

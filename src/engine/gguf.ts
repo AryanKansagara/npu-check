@@ -82,6 +82,7 @@ export function parseGguf(buf: Uint8Array, fileSize = buf.length): ModelIR {
     contextLength: num('context_length'), blockCount: num('block_count'), embeddingLength: num('embedding_length'),
     headCount: num('attention.head_count'), headCountKv: num('attention.head_count_kv'),
     fileType: typeof kv['general.file_type'] === 'number' ? FILE_TYPES[kv['general.file_type'] as number] : undefined,
+    encoder: /bert|t5encoder|clip/i.test(arch) || kv[`${arch}.pooling_type`] !== undefined || undefined,
   }
   const meta: Record<string, string> = {}
   for (const [k, v] of Object.entries(kv)) if (typeof v !== 'object') meta[k] = String(v)

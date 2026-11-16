@@ -51,6 +51,8 @@ export interface LlmMeta {
   headCount?: number
   headCountKv?: number
   fileType?: string
+  /** Encoder-only (embedding) model: no decode loop or KV cache */
+  encoder?: boolean
 }
 
 export interface ModelIR {

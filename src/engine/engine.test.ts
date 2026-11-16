@@ -141,7 +141,7 @@ test('pinDims writes a valid model with fixed input dims and untouched weights',
 test('detector: unsupported ops create 5 partitions; each fix lowers the count', () => {
   const base = run(detector())
   assert.equal(base.partitions, 5)
-  assert.equal(base.switches, 6)
+  assert.equal(base.switches, 7)
   assert.deepEqual(base.nodes.filter(n => n.status === 'cpu' && n.support === 'cpu').map(n => n.op).sort(), ['Einsum', 'Mod', 'NonMaxSuppression'])
   const r = run(detector(), ['replace-ops'])
   assert.equal(r.partitions, 2)

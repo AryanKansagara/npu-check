@@ -125,7 +125,7 @@ function parseTensor(r: Reader, f: Field, ctx: Ctx): TensorInfo {
   const t: TensorInfo = { name: '', dtype: 'unknown', shape: [] }
   const dims: number[] = []
   let raw: Field | null = null
-  const i64: number[] = [], i32: number[] = []
+  const i64: number[] = [], i32: number[] = [], f32: number[] = []
   for (const g of s.fields()) {
     if (g.no === 1) s.ints(g, dims)
     else if (g.no === 2) t.dtype = ONNX_DTYPES[g.n] ?? 'unknown'
@@ -133,6 +133,7 @@ function parseTensor(r: Reader, f: Field, ctx: Ctx): TensorInfo {
     else if (g.no === 9) raw = g
     else if (g.no === 7) s.ints(g, i64)
     else if (g.no === 5) s.ints(g, i32)
+    else if (g.no === 4) s.floats(g, f32)
     else if (g.no === 14 && g.n === 1) t.external = true
   }
   t.shape = dims
@@ -144,6 +145,13 @@ function parseTensor(r: Reader, f: Field, ctx: Ctx): TensorInfo {
       t.values = []
       for (let p = 0; p + w <= dv.byteLength; p += w) t.values.push(w === 8 ? Number(dv.getBigInt64(p, true)) : dv.getInt32(p, true))
     } else t.values = t.dtype === 'int64' ? i64 : i32
+  } else if (t.dtype === 'fp32' && numel <= 8 && dims.length <= 1) {
+    // Tiny float constants (Resize scales) are kept so output shapes can be inferred.
+    if (raw) {
+      const dv = new DataView(s.buf.buffer, s.buf.byteOffset + raw.start, raw.end - raw.start)
+      t.values = []
+      for (let p = 0; p + 4 <= dv.byteLength; p += 4) t.values.push(dv.getFloat32(p, true))
+    } else if (f32.length) t.values = f32
   }
   if (t.dtype === 'unknown') ctx.issues.push({ level: 'warn', where: `tensor ${t.name}`, message: 'Unknown data type; size assumed 4 bytes per element.' })
   return t
@@ -185,6 +193,7 @@ function checkGraph(ir: ModelIR) {
   const seen = new Map<string, number>()
   ir.nodes.forEach((n, i) => {
     for (const o of n.outputs) {
+      if (!o) continue // optional outputs left unnamed
       if (seen.has(o)) ir.issues.push({ level: 'error', where: `node ${i} (${n.name})`, message: `Output "${o}" is also produced by node ${seen.get(o)}.` })
       seen.set(o, i)
       produced.add(o)
@@ -276,16 +285,18 @@ export function buildOnnx(g: BuildGraph): Uint8Array {
  * Same idea as onnxruntime.tools.make_dynamic_shape_fixed.
  */
 export function pinDims(buf: Uint8Array, pins: Record<string, number>): Uint8Array {
-  const dimFix = (b: Uint8Array, f: Field) => {
+  // Unnamed dims (no dim_value, no dim_param) are pinned through the '?' key, on graph inputs only.
+  const dimFix = (b: Uint8Array, f: Field, anon: boolean) => {
     const r = new Reader(b, f.start, f.end)
-    let param = ''
-    for (const x of r.fields()) if (x.no === 2) param = r.str(x)
+    let param = '', hasValue = false
+    for (const x of r.fields()) { if (x.no === 2) param = r.str(x); else if (x.no === 1) hasValue = true }
+    if (!param && !hasValue && anon && '?' in pins) return new Writer().int(1, pins['?']).finish()
     return param in pins ? new Writer().int(1, pins[param]).finish() : null
   }
-  const shapeFix = (b: Uint8Array, f: Field) => rewrite(b, f.start, f.end, d => d.no === 1 ? dimFix(b, d) : null)
-  const ttFix = (b: Uint8Array, f: Field) => rewrite(b, f.start, f.end, d => d.no === 2 ? shapeFix(b, d) : null)
-  const typeFix = (b: Uint8Array, f: Field) => rewrite(b, f.start, f.end, d => d.no === 1 ? ttFix(b, d) : null)
-  const vinfoFix = (b: Uint8Array, f: Field) => rewrite(b, f.start, f.end, d => d.no === 2 ? typeFix(b, d) : null)
-  const graphFix = (b: Uint8Array, f: Field) => rewrite(b, f.start, f.end, d => d.no === 11 || d.no === 12 || d.no === 13 ? vinfoFix(b, d) : null)
+  const shapeFix = (b: Uint8Array, f: Field, anon: boolean) => rewrite(b, f.start, f.end, d => d.no === 1 ? dimFix(b, d, anon) : null)
+  const ttFix = (b: Uint8Array, f: Field, anon: boolean) => rewrite(b, f.start, f.end, d => d.no === 2 ? shapeFix(b, d, anon) : null)
+  const typeFix = (b: Uint8Array, f: Field, anon: boolean) => rewrite(b, f.start, f.end, d => d.no === 1 ? ttFix(b, d, anon) : null)
+  const vinfoFix = (b: Uint8Array, f: Field, anon: boolean) => rewrite(b, f.start, f.end, d => d.no === 2 ? typeFix(b, d, anon) : null)
+  const graphFix = (b: Uint8Array, f: Field) => rewrite(b, f.start, f.end, d => d.no === 11 || d.no === 12 || d.no === 13 ? vinfoFix(b, d, d.no === 11) : null)
   return rewrite(buf, 0, buf.length, f => f.no === 7 ? graphFix(buf, f) : null)
 }

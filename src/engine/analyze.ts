@@ -1,7 +1,7 @@
 // Readiness analysis: shapes, op inventory, NPU assignment, partitions, MACs, activation memory,
 // quantization readiness, roofline latency and fix recommendations.
 import { rule, type Support } from './support.ts'
-import { DTYPE_BYTES, type Dim, type ModelIR, type ModelNode, type TensorInfo } from './types.ts'
+import { DTYPE_BYTES, isStatic, type Dim, type ModelIR, type ModelNode, type TensorInfo } from './types.ts'
 
 // ---------- Device profiles ----------
 
@@ -69,6 +69,12 @@ export function suggestPin(sym: string): number {
   return 1
 }
 
+/** Default for a symbol in this model. Unnamed dims ('?') default to 224 when they sit in the spatial slots of an image input. */
+export function defaultPin(ir: ModelIR, sym: string): number {
+  if (sym !== '?') return suggestPin(sym)
+  return ir.inputs.some(n => { const s = ir.tensors[n]?.shape; return s?.length === 4 && s.slice(2).includes('?') }) ? 224 : 1
+}
+
 export function symbols(ir: ModelIR): string[] {
   const s = new Set<string>()
   for (const n of ir.inputs) for (const d of ir.tensors[n]?.shape ?? []) if (typeof d === 'string' && d !== '?') s.add(d)
@@ -107,39 +113,80 @@ export function topoOrder(ir: ModelIR): number[] {
  * Uses declared value_info when present and infers the common ops otherwise; unknown stays null.
  */
 export function inferShapes(ir: ModelIR, pins?: Record<string, number>, order = topoOrder(ir)): Record<string, Dim[] | null> {
-  const sub = (s: Dim[] | null): Dim[] | null => !s ? null : pins ? s.map(d => typeof d === 'string' && d !== '?' ? pins[d] ?? suggestPin(d) : d) : s
+  const sub = (s: Dim[] | null, input: boolean): Dim[] | null => !s ? null : pins ? s.map(d => typeof d === 'string' && (d !== '?' || input) ? pins[d] ?? defaultPin(ir, d) : d) : s
+  const inputs = new Set(ir.inputs)
   const S: Record<string, Dim[] | null> = {}
-  for (const t of Object.values(ir.tensors)) S[t.name] = sub(t.shape)
+  for (const t of Object.values(ir.tensors)) S[t.name] = sub(t.shape, inputs.has(t.name))
   if (ir.format !== 'onnx') return S
-  const val = (n: string) => ir.tensors[n]?.values
+  // Shape-valued tensors computed in the graph (Shape -> Gather -> Concat -> Reshape) are tracked so Reshape targets resolve.
+  const V: Record<string, Dim[]> = {}
+  const val = (n: string): Dim[] | undefined => ir.tensors[n]?.values ?? V[n]
   for (const i of order) {
     const n = ir.nodes[i]
-    if (n.outputs.every(o => !o || ir.tensors[o]?.shape)) continue
     const ins = n.inputs.map(x => x ? S[x] ?? null : null)
-    const out = inferNode(n, ins, val, S)
-    n.outputs.forEach((o, k) => { if (o && !(ir.tensors[o]?.shape)) S[o] = out[k] ?? null })
+    if (!n.outputs.every(o => !o || ir.tensors[o]?.shape)) {
+      const out = inferNode(n, ins, val, S)
+      n.outputs.forEach((o, k) => { if (o && !(ir.tensors[o]?.shape)) S[o] = out[k] ?? null })
+    }
+    const v = foldValue(n, ins, val)
+    if (v && v.length <= 64 && n.outputs[0]) V[n.outputs[0]] = v
   }
   return S
 }
 
-const UNARY = new Set(['Relu', 'Sigmoid', 'Tanh', 'Erf', 'Sqrt', 'Exp', 'Log', 'Clip', 'LeakyRelu', 'Gelu', 'HardSwish', 'HardSigmoid', 'Neg', 'Abs', 'Cast', 'Softmax', 'LogSoftmax', 'BatchNormalization', 'LayerNormalization', 'InstanceNormalization', 'LpNormalization', 'Dropout', 'Identity', 'QuantizeLinear', 'DequantizeLinear', 'Sign', 'Not', 'Floor', 'Ceil', 'Round', 'Elu', 'PRelu', 'Sin', 'Cos', 'Reciprocal', 'CumSum', 'ScatterND', 'ScatterElements', 'FastGelu', 'QuickGelu', 'SkipLayerNormalization'])
+const allNum = (x: Dim[] | undefined): number[] | undefined => x && x.every(d => typeof d === 'number') ? x as number[] : undefined
+
+/** Value of a node output when it is small integer shape math; dims may stay symbolic. */
+function foldValue(n: ModelNode, ins: (Dim[] | null)[], val: (n: string) => Dim[] | undefined): Dim[] | undefined {
+  const x = n.inputs.map(i => i ? val(i) : undefined)
+  const A = n.attrs
+  switch (n.op) {
+    case 'Shape': return ins[0]?.slice(typeof A.start === 'number' ? A.start : 0, typeof A.end === 'number' ? A.end : undefined)
+    case 'Identity': case 'Cast': case 'Unsqueeze': case 'Squeeze': return x[0]
+    case 'Gather': {
+      const src = x[0], idx = x[1]
+      if (!src || !idx || (typeof A.axis === 'number' && A.axis !== 0)) return undefined
+      return idx.map(i => typeof i === 'number' ? src[i < 0 ? i + src.length : i] ?? '?' : '?')
+    }
+    case 'Concat': return x.length && x.every(Boolean) ? (x as Dim[][]).flat() : undefined
+    case 'Slice': {
+      const st = allNum(x[1]) ?? ints(A.starts), en = allNum(x[2]) ?? ints(A.ends)
+      if (!x[0] || !st || !en || st.length !== 1 || (x[4] && x[4][0] !== 1)) return undefined
+      return x[0].slice(st[0], en[0] > 1e9 ? undefined : en[0])
+    }
+    case 'Add': case 'Sub': case 'Mul': case 'Div': {
+      const p = x[0], q = x[1]
+      if (!p || !q) return undefined
+      return Array.from({ length: Math.max(p.length, q.length) }, (_, i) => {
+        const a = p[p.length === 1 ? 0 : i], b = q[q.length === 1 ? 0 : i]
+        if (typeof a !== 'number' || typeof b !== 'number') return n.op === 'Mul' ? (a === 1 ? b : b === 1 ? a : '?') : '?'
+        const r = n.op === 'Add' ? a + b : n.op === 'Sub' ? a - b : n.op === 'Mul' ? a * b : a / b
+        return n.op === 'Div' && Number.isInteger(a) && Number.isInteger(b) ? Math.trunc(r) : r
+      })
+    }
+  }
+  return undefined
+}
+
+const UNARY = new Set(['LRN', 'Asin', 'Atan', 'Softplus', 'Selu', 'Mish', 'Softsign', 'Tan', 'Trilu', 'SimplifiedLayerNormalization', 'SkipSimplifiedLayerNormalization', 'QLinearSigmoid', 'QLinearLeakyRelu', 'QLinearSoftmax', 'Relu', 'Sigmoid', 'Tanh', 'Erf', 'Sqrt', 'Exp', 'Log', 'Clip', 'LeakyRelu', 'Gelu', 'HardSwish', 'HardSigmoid', 'Neg', 'Abs', 'Cast', 'Softmax', 'LogSoftmax', 'BatchNormalization', 'LayerNormalization', 'InstanceNormalization', 'LpNormalization', 'Dropout', 'Identity', 'QuantizeLinear', 'DequantizeLinear', 'Sign', 'Not', 'Floor', 'Ceil', 'Round', 'Elu', 'PRelu', 'Sin', 'Cos', 'Reciprocal', 'CumSum', 'ScatterND', 'ScatterElements', 'FastGelu', 'QuickGelu', 'SkipLayerNormalization'])
 const BINARY = new Set(['Add', 'Sub', 'Mul', 'Div', 'Pow', 'Max', 'Min', 'Equal', 'Greater', 'GreaterOrEqual', 'Less', 'LessOrEqual', 'And', 'Or', 'Where', 'Mod', 'Sum'])
 
-function inferNode(n: ModelNode, ins: (Dim[] | null)[], val: (n: string) => number[] | undefined, S: Record<string, Dim[] | null>): (Dim[] | null)[] {
+function inferNode(n: ModelNode, ins: (Dim[] | null)[], val: (n: string) => Dim[] | undefined, S: Record<string, Dim[] | null>): (Dim[] | null)[] {
   const a = ins[0], A = n.attrs
-  const v = (k: number) => n.inputs[k] ? val(n.inputs[k]) : undefined
+  const vd = (k: number) => n.inputs[k] ? val(n.inputs[k]) : undefined
+  const v = (k: number) => allNum(vd(k))
   if (UNARY.has(n.op)) return [a]
   if (BINARY.has(n.op)) return [ins.reduce<Dim[] | null>((acc, s) => acc && s ? bcast(acc, s) : null, a ?? null)]
   if (!a && n.op !== 'Constant') return []
   switch (n.op) {
-    case 'Conv': case 'MaxPool': case 'AveragePool': case 'QLinearConv': case 'ConvTranspose': {
+    case 'Conv': case 'MaxPool': case 'AveragePool': case 'QLinearConv': case 'ConvTranspose': case 'ConvInteger': case 'QLinearAveragePool': {
       const w = n.op === 'QLinearConv' ? ins[3] : ins[1]
       const sp = a!.length - 2
       const k = ints(A.kernel_shape) ?? (w ? w.slice(2) as number[] : Array(sp).fill(1))
       const st = ints(A.strides) ?? Array(sp).fill(1), dil = ints(A.dilations) ?? Array(sp).fill(1)
       const pads = ints(A.pads) ?? Array(sp * 2).fill(0)
       const ap = typeof A.auto_pad === 'string' ? A.auto_pad : 'NOTSET'
-      const cOut: Dim = n.op === 'MaxPool' || n.op === 'AveragePool' ? a![1] : n.op === 'ConvTranspose' ? (w ? (w[1] as number) * (typeof A.group === 'number' ? A.group : 1) : '?') : w ? w[0] : '?'
+      const cOut: Dim = n.op === 'MaxPool' || n.op === 'AveragePool' || n.op === 'QLinearAveragePool' ? a![1] : n.op === 'ConvTranspose' ? (w ? (w[1] as number) * (typeof A.group === 'number' ? A.group : 1) : '?') : w ? w[0] : '?'
       const spatial = a!.slice(2).map((x, i) => {
         const kk = (dil[i] ?? 1) * ((k[i] as number) - 1) + 1
         if (typeof x !== 'number') return st[i] === 1 && (ap.startsWith('SAME') || pads[i] + pads[i + sp] === kk - 1) ? x : '?'
@@ -150,7 +197,10 @@ function inferNode(n: ModelNode, ins: (Dim[] | null)[], val: (n: string) => numb
       })
       return [[a![0], cOut, ...spatial]]
     }
-    case 'GlobalAveragePool': case 'GlobalMaxPool': return [[a![0], a![1], ...a!.slice(2).map(() => 1)]]
+    case 'QLinearAdd': case 'QLinearMul': return [ins[3] ? bcast(a!, ins[3]) : null]
+    case 'DynamicQuantizeLinear': return [a, [], []]
+    case 'MatMulNBits': return [[...a!.slice(0, -1), typeof A.N === 'number' ? A.N : '?']]
+    case 'GlobalAveragePool': case 'GlobalMaxPool': case 'QLinearGlobalAveragePool': return [[a![0], a![1], ...a!.slice(2).map(() => 1)]]
     case 'Flatten': {
       const ax = typeof A.axis === 'number' ? (A.axis < 0 ? A.axis + a!.length : A.axis) : 1
       const prod = (s: Dim[]) => s.every(d => typeof d === 'number') ? (s as number[]).reduce((x, y) => x * y, 1) : s.length === 1 ? s[0] : '?'
@@ -166,7 +216,7 @@ function inferNode(n: ModelNode, ins: (Dim[] | null)[], val: (n: string) => numb
       return [[...batch, a![a!.length - 2], b[b.length - 1]]]
     }
     case 'Reshape': {
-      const shp = v(1)
+      const shp = vd(1)
       if (!shp) return [null]
       const out: Dim[] = shp.map((d, i) => d === 0 && A.allowzero !== 1 ? a![i] : d)
       const neg = out.indexOf(-1)
@@ -245,8 +295,8 @@ function inferNode(n: ModelNode, ins: (Dim[] | null)[], val: (n: string) => numb
       const keep = A.keepdims !== 0
       return [keep ? a!.map((d, i) => ax.includes(i) ? 1 : d) : a!.filter((_, i) => !ax.includes(i))]
     }
-    case 'Shape': return [[a!.length]]
-    case 'ConstantOfShape': { const s = v(0); return [s ?? null] }
+    case 'Shape': return [[a!.slice(typeof A.start === 'number' ? A.start : 0, typeof A.end === 'number' ? A.end : undefined).length]]
+    case 'ConstantOfShape': { const s = vd(0); return [s ?? null] }
     case 'Constant': return [S[n.outputs[0]] ?? null]
     case 'TopK': {
       const ax = ((A.axis as number) ?? -1) < 0 ? ((A.axis as number) ?? -1) + a!.length : A.axis as number
@@ -257,8 +307,8 @@ function inferNode(n: ModelNode, ins: (Dim[] | null)[], val: (n: string) => numb
     case 'NonZero': return [[a!.length, '?']]
     case 'NonMaxSuppression': return [['?', 3]]
     case 'Unique': return [['?']]
-    case 'Range': return [['?']]
-    case 'Expand': { const s = v(1); return [s ? bcast(a!, s) : null] }
+    case 'Range': { const r = [v(0)?.[0], v(1)?.[0], v(2)?.[0]]; return [[r.every(x => typeof x === 'number') ? Math.max(0, Math.ceil((r[1]! - r[0]!) / r[2]!)) : '?']] }
+    case 'Expand': { const s = vd(1); return [s ? bcast(a!, s) : null] }
     case 'Tile': { const r = v(1); return [r ? a!.map((d, i) => typeof d === 'number' ? d * r[i] : '?') : null] }
     case 'Pad': {
       const p = ints(A.pads) ?? v(1)
@@ -270,9 +320,13 @@ function inferNode(n: ModelNode, ins: (Dim[] | null)[], val: (n: string) => numb
       const f = (d: Dim, m: number) => typeof d === 'number' ? d * m : '?'
       return [[a![0], f(a![1], up ? 1 / (b * b) : b * b), f(a![2], up ? b : 1 / b), f(a![3], up ? b : 1 / b)]]
     }
-    case 'Resize': {
-      const sizes = v(3)
-      return [sizes ?? a!.map((d, i) => i < 2 ? d : '?')]
+    case 'Resize': case 'Upsample': {
+      const sizes = vd(3)
+      if (sizes) return [sizes]
+      // Opset 10 Resize and Upsample take scales as input 1; Upsample 7 as an attribute.
+      const sc = v(2) ?? (n.inputs.length === 2 ? v(1) : undefined) ?? ints(A.scales)
+      if (sc && sc.length === a!.length) return [a!.map((d, i) => typeof d === 'number' ? Math.floor(d * sc[i]) : sc[i] === 1 ? d : '?')]
+      return [a!.map((d, i) => i < 2 ? d : '?')]
     }
     case 'Einsum': {
       const eq = String(A.equation ?? '').replace(/\s/g, '')
@@ -337,7 +391,7 @@ export interface Analysis {
   cpuPartitions: number
   partitions: number
   switches: number
-  quant: { qdq: number; qlinear: number; perChannel: boolean; intWeightShare: number; verdict: 'quantized-per-channel' | 'quantized-per-tensor' | 'weight-only' | 'float'; precision: 'int8' | 'fp16' }
+  quant: { qdq: number; qlinear: number; perChannel: boolean; intWeightShare: number; verdict: 'quantized-per-channel' | 'quantized-per-tensor' | 'weight-only' | 'float'; precision: 'int8' | 'fp16'; fakeQuantParams?: number }
   latency: { npuMs: number; cpuMs: number; switchMs: number; totalMs: number; computeShare: number; tokensPerSec?: number; prefillMs?: number; kvCacheBytes?: number }
   findings: Finding[]
   available: FixId[]
@@ -363,7 +417,7 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
   const pinned = applied.includes('pin-dims')
   const quantFix = applied.includes('quantize-int8')
   const syms = symbols(ir)
-  const pins: Record<string, number> = Object.fromEntries(syms.map(s => [s, opts.pins[s] ?? suggestPin(s)]))
+  const pins: Record<string, number> = Object.fromEntries(syms.map(s => [s, opts.pins[s] ?? defaultPin(ir, s)]))
   const order = topoOrder(ir)
   const symShapes = inferShapes(ir, undefined, order)
   const numShapes = inferShapes(ir, pins, order)
@@ -372,11 +426,15 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
   // Weights
   const dtypes: Analysis['dtypes'] = { fp32: { tensors: 0, params: 0, bytes: 0 }, fp16: { tensors: 0, params: 0, bytes: 0 }, int8: { tensors: 0, params: 0, bytes: 0 }, int4: { tensors: 0, params: 0, bytes: 0 }, other: { tensors: 0, params: 0, bytes: 0 } }
   let params = 0, weightBytes = 0, externalBytes = 0
+  // MatMulNBits packs int4 weights into uint8 blobs: count the real weights (K x N), not the blob bytes.
+  const packed = new Map<string, { params: number; bits: number }>()
+  for (const n of ir.nodes) if (n.op === 'MatMulNBits' && typeof n.attrs.K === 'number' && typeof n.attrs.N === 'number') packed.set(n.inputs[1], { params: n.attrs.K * n.attrs.N, bits: typeof n.attrs.bits === 'number' ? n.attrs.bits : 4 })
   for (const t of Object.values(ir.tensors)) {
     if (!t.init) continue
-    const p = numel(t.shape)
+    const pk = packed.get(t.name)
+    const p = pk ? pk.params : numel(t.shape)
     const b = tensorBytes(t, t.shape)
-    const k = bucketOf(t.dtype)
+    const k = pk ? (pk.bits <= 4 ? 'int4' : 'int8') : bucketOf(t.dtype)
     dtypes[k].tensors++; dtypes[k].params += p; dtypes[k].bytes += b
     params += p; weightBytes += b
     if (t.external) externalBytes += b
@@ -395,13 +453,38 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
   const verdict: Analysis['quant']['verdict'] = quantized ? (perChannel ? 'quantized-per-channel' : 'quantized-per-tensor') : intWeightShare > 0.5 ? 'weight-only' : 'float'
   const precision: 'int8' | 'fp16' = quantized || quantFix ? 'int8' : 'fp16'
   const actScale = quantFix && !quantized ? 0.25 : 1
-  const wScale = (t: TensorInfo) => quantFix && !quantized && (t.dtype === 'fp32') ? 0.25 : quantFix && !quantized && t.dtype === 'fp16' ? 0.5 : 1
+  // QDQ and QOperator files keep fp32 tensors between the quantize nodes, but the compiled graph runs them at the
+  // quantized width (the zero-point type of the activation QuantizeLinear nodes). Dynamic quantization stays float.
+  const dynQuant = ir.nodes.some(n => /^DynamicQuantize|Integer$/.test(n.op))
+  const fileQuant = ir.format === 'onnx' && (qdq > 0 || qlinear > 0) && !dynQuant
+  const zpBytes = ir.nodes.filter(n => n.op === 'QuantizeLinear' && !ir.tensors[n.inputs[0]]?.init).map(n => DTYPE_BYTES[ir.tensors[n.inputs[2]]?.dtype ?? 'uint8'] ?? 1)
+  const qActBytes = zpBytes.filter(b => b === 2).length > zpBytes.length / 2 ? 2 : 1
+  // fp32 weights that only feed QuantizeLinear are int8 once compiled.
+  const fakeQuant = new Set<string>()
+  const wScale = (t: TensorInfo) => fakeQuant.has(t.name) ? 0.25 : quantFix && !quantized && (t.dtype === 'fp32') ? 0.25 : quantFix && !quantized && t.dtype === 'fp16' ? 0.5 : 1
 
   // Consumers / producers
   const producer = new Map<string, number>()
   ir.nodes.forEach((n, i) => n.outputs.forEach(o => o && producer.set(o, i)))
   const consumers = new Map<string, number[]>()
   ir.nodes.forEach((n, i) => n.inputs.forEach(x => { if (x) { const l = consumers.get(x) ?? []; l.push(i); consumers.set(x, l) } }))
+
+  let fakeQuantParams = 0
+  for (const t of Object.values(ir.tensors)) {
+    const users = consumers.get(t.name)
+    if (t.init && t.dtype === 'fp32' && numel(t.shape) > 1 && users?.length && users.every(i => ir.nodes[i].op === 'QuantizeLinear')) { fakeQuant.add(t.name); fakeQuantParams += numel(t.shape) }
+  }
+
+  // Nodes the converter folds away: Constant, anything computed only from constants, and Shape of a static tensor.
+  const folded = new Set<number>()
+  const foldedOut = new Set<string>()
+  if (ir.format !== 'gguf') for (const i of order) {
+    const n = ir.nodes[i]
+    const ins = n.inputs.filter(Boolean)
+    const constIn = ins.length > 0 && ins.every(x => ir.tensors[x]?.init || foldedOut.has(x))
+    const staticShape = n.op === 'Shape' && isStatic(checkShapes[n.inputs[0]] ?? null)
+    if (n.op === 'Constant' || ((constIn || staticShape) && !/^Random|^Bernoulli|^Multinomial/.test(n.op))) { folded.add(i); n.outputs.forEach(o => o && foldedOut.add(o)) }
+  }
 
   // Post-processing tail: the first post op and everything downstream of it.
   const tail = new Set<number>()
@@ -422,7 +505,7 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
     const { macs, flops } = cost(n, numShapes, ir)
     const base = { index: i, name: n.name, op: n.op, support: r.status, macs, flops, outShape: checkShapes[n.outputs[0]] ?? outShape, ms: 0 }
     if (tail.has(i)) return { ...base, status: 'removed' as const, reason: 'Moved to CPU post-processing outside the NPU graph.' }
-    if (n.op === 'Constant') return { ...base, status: 'npu' as const, reason: 'Constant, folded.' }
+    if (folded.has(i)) return { ...base, macs: 0, flops: 0, status: 'npu' as const, reason: n.op === 'Constant' ? 'Constant, folded.' : 'Computed from constants only; folded at conversion.' }
     if (r.status === 'cpu') {
       if (r.replace && applied.includes('replace-ops') && !SPLIT_SHAPES.has(n.op)) return { ...base, status: 'npu' as const, reason: `Rewritten: ${r.replace}` }
       return { ...base, status: 'cpu' as const, reason: r.note }
@@ -446,24 +529,28 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
   const find = (x: number): number => parent[x] === x ? x : (parent[x] = find(parent[x]))
   const switchTensors = new Set<string>()
   ir.nodes.forEach((n, i) => {
-    if (nodes[i].status === 'removed') return
+    if (nodes[i].status === 'removed' || folded.has(i)) return
     for (const x of n.inputs) {
       const p = producer.get(x)
-      if (p === undefined || nodes[p].status === 'removed' || ir.nodes[p].op === 'Constant') continue
+      if (p === undefined || nodes[p].status === 'removed' || folded.has(p)) continue
       if (nodes[p].status === nodes[i].status) parent[find(p)] = find(i)
       else switchTensors.add(x)
     }
   })
-  const comps = (s: NodeStatus) => new Set(active.filter(n => n.status === s && n.op !== 'Constant').map(n => find(n.index))).size
+  const comps = (s: NodeStatus) => new Set(active.filter(n => n.status === s && !folded.has(n.index)).map(n => find(n.index))).size
   const npuPartitions = comps('npu'), cpuPartitions = comps('cpu')
   const switches = switchTensors.size + (tail.size ? 1 : 0)
 
   // Peak activation memory by liveness over the topological order.
-  const isAct = (name: string) => !!name && !ir.tensors[name]?.init
+  const isAct = (name: string) => !!name && !ir.tensors[name]?.init && !foldedOut.has(name)
   const lastUse = new Map<string, number>()
   order.forEach((ni, step) => ir.nodes[ni].inputs.forEach(x => isAct(x) && lastUse.set(x, step)))
   const outputsSet = new Set(ir.outputs)
-  const actBytes = (name: string) => numel(numShapes[name], pins) * (DTYPE_BYTES[ir.tensors[name]?.dtype ?? 'fp32'] ?? 4) * actScale
+  const actBytes = (name: string) => {
+    const dt = ir.tensors[name]?.dtype
+    const width = fileQuant && (!dt || dt === 'fp32' || dt === 'unknown') ? qActBytes : DTYPE_BYTES[dt ?? 'fp32'] ?? 4
+    return numel(numShapes[name], pins) * width * actScale
+  }
   let live = 0, peakBytes = 0, peakAt = ''
   const liveSet = new Set<string>()
   for (const x of ir.inputs) { liveSet.add(x); live += actBytes(x) }
@@ -471,7 +558,7 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
   order.forEach((ni, step) => {
     const n = ir.nodes[ni]
     for (const o of n.outputs) {
-      if (!isAct(o) || n.op === 'Constant') continue
+      if (!isAct(o)) continue
       const b = actBytes(o)
       liveSet.add(o); live += b
       if (!largest || b > largest.bytes) largest = { name: o, bytes: b }
@@ -488,6 +575,8 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
   let npuMs = 0, cpuMs = 0, computeMs = 0
   nodes.forEach((r, i) => {
     const n = ir.nodes[i]
+    // Folded nodes do not exist at runtime; Q/DQ pairs are absorbed into the quantized kernels.
+    if (folded.has(i) || (fileQuant && (n.op === 'QuantizeLinear' || n.op === 'DequantizeLinear'))) return
     const bytes = n.inputs.reduce((s, x) => s + (ir.tensors[x]?.init ? tensorBytes(ir.tensors[x], ir.tensors[x].shape) * wScale(ir.tensors[x]) : actBytes(x)), 0) + n.outputs.reduce((s, o) => s + actBytes(o), 0)
     const onNpu = r.status === 'npu'
     const compute = r.flops / (onNpu ? npuRate : device.cpuGflops * 1e9) * 1000
@@ -505,16 +594,25 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
   if (ir.llm) {
     // Decode is memory-bound: every token streams all weights once.
     const wb = weightBytes * (quantFix && dtypes.int4.params < params / 2 ? 0.25 : 1)
+    const L = ir.llm
+    // Embedding tables are lookups, not multiplies.
+    const embd = Object.values(ir.tensors).filter(t => /^(token_embd|position_embd|token_types)\.weight$/.test(t.name)).reduce((s, t) => s + numel(t.shape), 0)
+    if (L.encoder) {
+      // Encoder-only (embedding) models run one pass over the whole sequence: no decode loop, no KV cache.
+      const tokens = Math.min(L.contextLength ?? 512, pins.ctx ?? 512)
+      latency.totalMs = latency.npuMs = Math.max(2 * (params - embd) * tokens / npuRate, wb / bw) * 1000
+      latency.prefillMs = latency.totalMs
+    } else {
     latency.tokensPerSec = bw * device.util * 2 / wb
     const prefillTokens = 512
-    latency.prefillMs = 2 * params * prefillTokens / npuRate * 1000
-    const L = ir.llm
+    latency.prefillMs = 2 * (params - (ir.tensors['output.weight'] ? embd : 0)) * prefillTokens / npuRate * 1000
     if (L.blockCount && L.embeddingLength && L.contextLength) {
       const kvRatio = L.headCount && L.headCountKv ? L.headCountKv / L.headCount : 1
       latency.kvCacheBytes = 2 * L.blockCount * Math.min(L.contextLength, pins.ctx ?? 4096) * L.embeddingLength * kvRatio * 2
     }
     latency.totalMs = 1000 / latency.tokensPerSec
     latency.npuMs = latency.totalMs
+    }
   }
 
   // Op inventory
@@ -546,9 +644,9 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
     params, weightBytes, externalBytes, dtypes,
     macs: nodes.reduce((s, n) => s + n.macs, 0), flops: nodes.reduce((s, n) => s + n.flops, 0),
     peakBytes, peakAt, largest,
-    npuNodes: nodes.filter(n => n.status === 'npu' && n.op !== 'Constant').length, cpuNodes: nodes.filter(n => n.status === 'cpu').length,
+    npuNodes: nodes.filter(n => n.status === 'npu' && !folded.has(n.index)).length, cpuNodes: nodes.filter(n => n.status === 'cpu').length,
     npuPartitions, cpuPartitions, partitions: npuPartitions + cpuPartitions, switches,
-    quant: { qdq, qlinear, perChannel, intWeightShare, verdict, precision },
+    quant: { qdq, qlinear, perChannel, intWeightShare, verdict, precision, fakeQuantParams },
     latency, findings: [], available: [], score: 0, symbols: syms,
   }
   out.findings = findings(ir, out, opts, pins, floatParams)
@@ -561,10 +659,10 @@ function constraintViolation(n: ModelNode, S: Record<string, Dim[] | null>, ir: 
   const w = ir.tensors[n.inputs[1]]
   switch (n.op) {
     case 'Conv': case 'ConvTranspose':
-      if ((S[n.inputs[1]]?.length ?? 4) === 5) return '3D convolution has no NPU kernel.'
       if (w && !w.init && ir.format === 'onnx' && !ir.nodes.some(m => m.outputs.includes(n.inputs[1]) && m.op === 'DequantizeLinear')) return 'Weights are not constant (computed at runtime).'
       if (n.op === 'ConvTranspose' && (ints(n.attrs.dilations) ?? []).some(d => d > 1)) return 'Dilated transposed convolution falls back.'
       return null
+    case 'Shape': return 'Input shape is dynamic, so Shape is computed on the CPU at runtime.'
     case 'Resize': return n.attrs.mode === 'cubic' ? 'Cubic resize falls back; use linear.' : null
     case 'TopK': return n.inputs[1] && !ir.tensors[n.inputs[1]]?.values ? 'k is not a constant.' : null
     case 'ReduceMean': case 'ReduceSum': case 'ReduceMax': case 'ReduceMin':
@@ -579,7 +677,7 @@ export function cost(n: ModelNode, S: Record<string, Dim[] | null>, ir: ModelIR)
   const outN = numel(out)
   let macs = 0
   const tflite = n.attrs.layout === 'NHWC'
-  if (n.op === 'Conv' || n.op === 'QLinearConv' || n.op === 'ConvTranspose') {
+  if (n.op === 'Conv' || n.op === 'QLinearConv' || n.op === 'ConvInteger' || n.op === 'ConvTranspose') {
     const w = S[n.inputs[n.op === 'QLinearConv' ? 3 : 1]]
     if (w && out) {
       const wN = numel(w)
@@ -590,6 +688,8 @@ export function cost(n: ModelNode, S: Record<string, Dim[] | null>, ir: ModelIR)
   } else if (n.op === 'MatMul' || n.op === 'QLinearMatMul' || n.op === 'MatMulInteger' || n.op === 'FusedMatMul') {
     const a = S[n.inputs[0]]
     if (a && out) macs = outN * (typeof a[a.length - 1] === 'number' ? a[a.length - 1] as number : 1)
+  } else if (n.op === 'MatMulNBits') {
+    macs = outN * (typeof n.attrs.K === 'number' ? n.attrs.K : 1)
   } else if (n.op === 'Gemm') {
     const a = S[n.inputs[0]]
     if (a && out) {
@@ -616,7 +716,8 @@ function findings(ir: ModelIR, a: Analysis, opts: Options, pins: Record<string, 
   const applied = new Set(opts.applied)
   if (ir.llm) {
     const L = ir.llm
-    f.push({ id: 'llm-path', severity: 'info', title: 'LLM weights: plan the runtime, not just the file', detail: `GGUF is a llama.cpp format. On Snapdragon, NPU execution of LLMs goes through a converted model (QAIRT / Genie, or llama.cpp's experimental Hexagon backend), with static context buckets and a KV cache sized up front. Architecture: ${L.arch}${L.blockCount ? `, ${L.blockCount} blocks` : ''}${L.contextLength ? `, trained context ${L.contextLength}` : ''}.` })
+    if (L.encoder) f.push({ id: 'llm-path', severity: 'info', title: 'Encoder-only model: export a graph for the NPU', detail: `GGUF is a llama.cpp format with no operator graph. For the NPU, export this ${L.arch} encoder to ONNX with a fixed sequence length and quantize it; there is no decode loop or KV cache. ${L.blockCount ?? '?'} blocks, context ${L.contextLength ?? '?'}. The estimate is one pass over ${Math.min(L.contextLength ?? 512, pins.ctx ?? 512)} tokens.` })
+    else f.push({ id: 'llm-path', severity: 'info', title: 'LLM weights: plan the runtime, not just the file', detail: `GGUF is a llama.cpp format. On Snapdragon, NPU execution of LLMs goes through a converted model (QAIRT / Genie, or llama.cpp's experimental Hexagon backend), with static context buckets and a KV cache sized up front. Architecture: ${L.arch}${L.blockCount ? `, ${L.blockCount} blocks` : ''}${L.contextLength ? `, trained context ${L.contextLength}` : ''}.` })
     if (a.dtypes.fp32.params + a.dtypes.fp16.params > a.params * 0.5) f.push({ id: 'llm-float', severity: 'warn', title: 'Mostly float weights', detail: `Decode streams every weight per token, so ${fmtBytes(a.weightBytes)} of float weights caps throughput. A 4-bit build cuts memory traffic about 4x versus fp16.`, fix: 'quantize-int8' })
     if (a.latency.kvCacheBytes) f.push({ id: 'kv', severity: 'info', title: `KV cache: ${fmtBytes(a.latency.kvCacheBytes)} at ${Math.min(L.contextLength ?? 0, pins.ctx ?? 4096)} tokens`, detail: 'fp16 cache, grouped-query heads accounted for. On phones, this plus weights must fit next to everything else in shared memory.' })
     return f
@@ -639,7 +740,11 @@ function findings(ir: ModelIR, a: Analysis, opts: Options, pins: Record<string, 
   if (a.quant.verdict === 'float' && !applied.has('quantize-int8')) f.push({ id: 'float', severity: 'warn', title: 'Float model: no QDQ quantization', detail: `${fmtBytes(a.weightBytes)} of float weights. The NPU runs fp32 graphs at fp16 at best (half the int8 rate) and some delegates refuse fp32 outright. Quantize to int8 QDQ with 100 to 500 calibration samples from real inputs; keep LayerNorm and Softmax at int16 or fp16 if accuracy drops.`, fix: 'quantize-int8' })
   else if (a.quant.verdict === 'quantized-per-tensor') f.push({ id: 'per-tensor', severity: 'info', title: 'Per-tensor weight quantization', detail: 'Per-channel weight scales for Conv and MatMul usually recover most of the accuracy lost at int8 at no speed cost.' })
   else if (a.quant.verdict === 'weight-only') f.push({ id: 'weight-only', severity: 'info', title: 'Weights are integer but activations are float', detail: 'Weight-only quantization saves memory but the math still runs in float. Full QDQ (activations too) is what unlocks int8 kernels.', fix: 'quantize-int8' })
-  if (floatParams && a.dtypes.fp32.params > 0 && a.quant.verdict !== 'float' && a.dtypes.fp32.params / Math.max(1, a.params) > 0.2) f.push({ id: 'fp32-left', severity: 'info', title: `${Math.round(a.dtypes.fp32.params / a.params * 100)}% of weights still fp32`, detail: 'Mixed graph: check that the fp32 tensors are biases or excluded layers, not a missed quantization pass.' })
+  const fq = a.quant.fakeQuantParams ?? 0
+  const fp32Left = a.dtypes.fp32.params - fq
+  if (fq) f.push({ id: 'fake-quant', severity: 'info', title: `Weights stored as fp32 behind QuantizeLinear`, detail: `${fmtBytes(fq * 4)} of weights are kept in fp32 and quantized by Q/DQ pairs in the graph. This is a valid QDQ layout: the compiled model holds them as integers, about ${fmtBytes(fq)}.` })
+  if (ir.nodes.some(n => /^DynamicQuantize|Integer$/.test(n.op))) f.push({ id: 'dyn-quant', severity: 'blocker', title: 'Dynamically quantized model', detail: 'DynamicQuantizeLinear / MatMulInteger compute activation scales at runtime, so activations stay float and nothing maps to int8 NPU kernels. Start again from the float model and run static quantization (quantize_static, QuantFormat.QDQ) with calibration data.' })
+  if (floatParams && fp32Left > 0 && a.quant.verdict !== 'float' && fp32Left / Math.max(1, a.params) > 0.2) f.push({ id: 'fp32-left', severity: 'info', title: `${Math.round(fp32Left / a.params * 100)}% of weights still fp32`, detail: 'Mixed graph: check that the fp32 tensors are biases or excluded layers, not a missed quantization pass.' })
   const vtcm = opts.device.vtcmMB * MB
   const big = a.nodes.filter(n => n.status === 'npu').map(n => ({ n, b: numel(n.outShape, pins) * (a.quant.precision === 'int8' ? 1 : 2) })).filter(x => x.b > vtcm)
   if (big.length) f.push({ id: 'activations', severity: 'warn', title: `${big.length} activation${big.length > 1 ? 's' : ''} larger than ${opts.device.vtcmMB} MB of NPU scratch`, detail: `Largest: ${big.sort((x, y) => y.b - x.b)[0].n.name} at ${fmtBytes(big[0].b)}. Tensors that do not fit spill to DRAM and become bandwidth-bound; tile the input or reduce resolution.`, nodes: big.map(x => x.n.name) })
