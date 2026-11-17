@@ -46,7 +46,7 @@ export default function Report({ id }: { id: string }) {
         <tbody>{(['fp32', 'fp16', 'int8', 'int4', 'other'] as const).filter(k => a.dtypes[k].tensors).map(k => <tr key={k}><td>{k}</td><td className="num">{a.dtypes[k].tensors}</td><td className="num">{fmtSi(a.dtypes[k].params)}</td><td className="num">{fmtBytes(a.dtypes[k].bytes)}</td></tr>)}</tbody></table>
       <h2>Method and assumptions</h2>
       <p className="small">Latency is a roofline estimate per node: the larger of compute time (2 x MACs over TOPS x utilisation, fp16 at half the int8 rate, CPU nodes at the CPU GFLOPS) and memory time (bytes read and written over DRAM bandwidth), plus a fixed cost and copy per CPU/NPU switch. Op support comes from a curated table reviewed {TABLE_DATE} from: {SOURCES.map(s => s.name).join('; ')}. It is not an official compatibility list; confirm on device with CPU fallback disabled.</p>
-      <p className="muted small">NPU Check by Aryan Kansagara. Independent project, not affiliated with Qualcomm.</p>
+      <p className="muted small">NPU Check by Aryan Kansagara.</p>
     </article>
   )
 }

@@ -42,4 +42,4 @@ npm run build
 
 Copy `.env.example` to `.env` for optional sync (public Supabase URL and publishable key).
 
-Built by Aryan Kansagara. Independent project, not affiliated with Qualcomm.
+Built by Aryan Kansagara.
