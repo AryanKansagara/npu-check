@@ -1,1 +1,4 @@
-{ "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }] }
+{
+  "git": { "deploymentEnabled": { "**": false, "main": true } },
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+}
