@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { analyze, compare, FIX_LABELS, fmtBytes, nodeReportCsv, opReportCsv, summarize, type Analysis, type DeviceProfile, type FixId, defaultPin } from './engine/analyze.ts'
 import { pinDims } from './engine/onnx.ts'
+import { py, pyList, shOpt, shPath } from './engine/quote.ts'
 import { rule, TABLE_DATE } from './engine/support.ts'
 import type { Dim, ModelIR } from './engine/types.ts'
 import { GraphView, Legend, MAX_DRAW, nodeClass } from './GraphView.tsx'
@@ -332,7 +333,7 @@ function FixArtifact({ f, project, version, ir, a, update }: { f: FixId; project
   const out = file.replace(/\.onnx$/i, '')
   if (f === 'pin-dims') {
     const pins = Object.fromEntries(a.symbols.map(s => [s, project.settings.pins[s] ?? defaultPin(ir, s)]))
-    const cmd = Object.entries(pins).filter(([s]) => s !== '?').map(([s, v]) => `python -m onnxruntime.tools.make_dynamic_shape_fixed --dim_param ${s} --dim_value ${v} ${file} ${out}_static.onnx`).join('\n')
+    const cmd = Object.entries(pins).filter(([s]) => s !== '?').map(([s, v]) => `python -m onnxruntime.tools.make_dynamic_shape_fixed ${shOpt('--dim_param', s)} --dim_value ${v} ${shPath(file)} ${shPath(`${out}_static.onnx`)}`).join('\n')
     return (
       <div className="stack-sm">
         <div className="inline-fields">
@@ -342,7 +343,7 @@ function FixArtifact({ f, project, version, ir, a, update }: { f: FixId; project
         </div>
         {ir.format === 'onnx' && <PinnedDownload project={project} version={version} pins={pins} />}
         {ir.format === 'onnx' && <Code label="Shell · same result with ONNX Runtime tools" code={cmd} />}
-        {ir.format === 'tflite' && <Code label="Python · re-export with a fixed signature" code={`# Re-convert with concrete input shapes so the interpreter sees no -1 dims\nconverter = tf.lite.TFLiteConverter.from_concrete_functions([\n    model.__call__.get_concrete_function(tf.TensorSpec(${JSON.stringify((a.inputs[0]?.shape ?? []).map(d => typeof d === 'number' ? d : pins[d] ?? 1))}, tf.float32))\n])\nopen("${out}_static.tflite", "wb").write(converter.convert())`} />}
+        {ir.format === 'tflite' && <Code label="Python · re-export with a fixed signature" code={`# Re-convert with concrete input shapes so the interpreter sees no -1 dims\nconverter = tf.lite.TFLiteConverter.from_concrete_functions([\n    model.__call__.get_concrete_function(tf.TensorSpec(${JSON.stringify((a.inputs[0]?.shape ?? []).map(d => typeof d === 'number' ? d : pins[d] ?? 1))}, tf.float32))\n])\nopen(${py(`${out}_static.tflite`)}, "wb").write(converter.convert())`} />}
       </div>
     )
   }
@@ -355,7 +356,7 @@ function FixArtifact({ f, project, version, ir, a, update }: { f: FixId; project
     const producedOutside = new Set(ir.nodes.flatMap((n, i) => removed.has(i) ? [] : n.outputs))
     const cut = [...new Set([...removed].flatMap(i => ir.nodes[i].inputs).filter(x => producedOutside.has(x)))]
     const keepOut = ir.outputs.filter(o => producedOutside.has(o))
-    return <Code label="Python · cut the graph before post-processing" code={`import onnx.utils\n\n# Everything up to the tensors that feed NMS stays on the NPU; NMS runs in your app.\nonnx.utils.extract_model(\n    "${file}", "${out}_npu.onnx",\n    input_names=${JSON.stringify(a.inputs.map(i => i.name))},\n    output_names=${JSON.stringify([...new Set([...cut, ...keepOut])])},\n)`} />
+    return <Code label="Python · cut the graph before post-processing" code={`import onnx.utils\n\n# Everything up to the tensors that feed NMS stays on the NPU; NMS runs in your app.\nonnx.utils.extract_model(\n    ${py(file)}, ${py(`${out}_npu.onnx`)},\n    input_names=${pyList(a.inputs.map(i => i.name))},\n    output_names=${pyList([...new Set([...cut, ...keepOut])])},\n)`} />
   }
   const ins = a.inputs.map(i => ({ name: i.name, shape: (i.shape ?? []).map(d => typeof d === 'number' ? d : project.settings.pins[d] ?? 1) }))
   return <Code label="Python · ONNX Runtime static QDQ for the QNN EP" code={quantSnippet(file, out, ins)} />
@@ -391,17 +392,17 @@ class Reader(CalibrationDataReader):
 def load_samples():
     # Replace with your data loader. Shapes must match the (pinned) model inputs.
     for _ in range(200):
-        yield {${ins.map(i => `\n            "${i.name}": np.random.rand(${i.shape.join(', ')}).astype(np.float32),`).join('')}
+        yield {${ins.map(i => `\n            ${py(i.name)}: np.random.rand(${i.shape.join(', ')}).astype(np.float32),`).join('')}
         }
 
-qnn_preprocess_model("${file}", "${out}_pre.onnx")
+qnn_preprocess_model(${py(file)}, ${py(`${out}_pre.onnx`)})
 config = get_qnn_qdq_config(
-    "${out}_pre.onnx", Reader(load_samples()),
+    ${py(`${out}_pre.onnx`)}, Reader(load_samples()),
     activation_type=QuantType.QUInt16,   # 16-bit activations: safer accuracy, still on the NPU
     weight_type=QuantType.QUInt8,        # per-channel 8-bit weights
     per_channel=True,
 )
-quantize("${out}_pre.onnx", "${out}_qdq.onnx", config)`
+quantize(${py(`${out}_pre.onnx`)}, ${py(`${out}_qdq.onnx`)}, config)`
 }
 
 function verifySnippet(file: string, a: Analysis) {
@@ -411,7 +412,7 @@ function verifySnippet(file: string, a: Analysis) {
 so = ort.SessionOptions()
 so.add_session_config_entry("session.disable_cpu_ep_fallback", "1")  # fail instead of silently using the CPU
 sess = ort.InferenceSession(
-    "${name.replace(/\.onnx$/i, a.quant.verdict === 'float' ? '_qdq.onnx' : '.onnx')}", sess_options=so,
+    ${py(name.replace(/\.onnx$/i, a.quant.verdict === 'float' ? '_qdq.onnx' : '.onnx'))}, sess_options=so,
     providers=[("QNNExecutionProvider", {"backend_path": "QnnHtp.dll", "htp_performance_mode": "burst"})],
 )
 print(sess.get_providers())`
