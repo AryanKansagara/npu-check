@@ -823,7 +823,11 @@ function score(ir: ModelIR, a: Analysis): number {
 
 // ---------- Reports ----------
 
-const csvCell = (v: string | number) => { const s = String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s }
+// Names come from someone else's file. A leading quote keeps a spreadsheet from running text as a formula (OWASP CSV injection).
+const csvCell = (v: string | number) => {
+  const s = typeof v === 'string' && /^[=+\-@\t\r\n＝＋－＠]/.test(v) ? `'${v}` : String(v)
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+}
 
 export function opReportCsv(a: Analysis): string {
   const head = ['op', 'domain', 'count', 'support', 'on_npu', 'on_cpu', 'macs', 'note', 'replacement']
