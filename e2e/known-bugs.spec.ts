@@ -72,7 +72,6 @@ test('a node name that looks like a formula is exported as text (#8)', async ({ 
 })
 
 test('the shell command pins every dim, not only the last (#9)', async ({ page }) => {
-  test.fail(true, issue(9))
   await openSample(page, 'Transformer block, dynamic sequence')
   await tab(page, 'Fixes').click()
   const lines = (await copyCode(page, /^Shell/)).split('\n').filter(l => l.includes('--dim_param'))
@@ -80,6 +79,22 @@ test('the shell command pins every dim, not only the last (#9)', async ({ page }
   // The second step must start from what the first one wrote.
   const last = (l: string) => l.split(' ').at(-1), source = (l: string) => l.split(' ').at(-2)
   expect(source(lines[1])).toBe(last(lines[0]))
+  expect(source(lines[0])).toBe('synthetic_transformer_block.onnx')
+})
+
+test('a model whose only dynamic dims are unnamed has no shell command (#9)', async ({ page }) => {
+  const shape = ['', 16, 8, 8]
+  await importModel(page, 'anon.onnx', onnx({ inputs: [{ name: 'x', shape }], outputs: [{ name: 'y', shape }], nodes: [{ op: 'Relu', in: ['x'], out: ['y'] }] }))
+  await tab(page, 'Fixes').click()
+  await expect(page.getByRole('button', { name: 'Download pinned .onnx' })).toBeVisible()
+  await expect(page.locator('.code-head span', { hasText: /^Shell/ })).toHaveCount(0)
+})
+
+test('a command that leaves unnamed dims says so (#9)', async ({ page }) => {
+  const shape = ['batch', 16, '', 8]
+  await importModel(page, 'mixed.onnx', onnx({ inputs: [{ name: 'x', shape }], outputs: [{ name: 'y', shape }], nodes: [{ op: 'Relu', in: ['x'], out: ['y'] }] }))
+  await tab(page, 'Fixes').click()
+  expect(await copyCode(page, /^Shell · named dims only/)).toContain('--dim_param batch --dim_value 1 mixed.onnx mixed_static.onnx')
 })
 
 test('a reversed Slice keeps its length (#10)', async ({ page }) => {

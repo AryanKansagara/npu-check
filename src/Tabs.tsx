@@ -333,7 +333,9 @@ function FixArtifact({ f, project, version, ir, a, update }: { f: FixId; project
   const out = file.replace(/\.onnx$/i, '')
   if (f === 'pin-dims') {
     const pins = Object.fromEntries(a.symbols.map(s => [s, project.settings.pins[s] ?? defaultPin(ir, s)]))
-    const cmd = Object.entries(pins).filter(([s]) => s !== '?').map(([s, v]) => `python -m onnxruntime.tools.make_dynamic_shape_fixed ${shOpt('--dim_param', s)} --dim_value ${v} ${shPath(file)} ${shPath(`${out}_static.onnx`)}`).join('\n')
+    const fixed = `${out}_static.onnx`, unnamed = '?' in pins
+    // The tool fixes one dim per run, so every run after the first continues from the previous output.
+    const cmd = Object.entries(pins).filter(([s]) => s !== '?').map(([s, v], i) => `python -m onnxruntime.tools.make_dynamic_shape_fixed ${shOpt('--dim_param', s)} --dim_value ${v} ${shPath(i ? fixed : file)} ${shPath(fixed)}`).join('\n')
     return (
       <div className="stack-sm">
         <div className="inline-fields">
@@ -341,8 +343,8 @@ function FixArtifact({ f, project, version, ir, a, update }: { f: FixId; project
             <label key={s} className="field"><span>{s === '?' ? 'unnamed dims' : s}</span><input type="number" min={1} value={pins[s]} onChange={e => { const v = Math.max(1, Math.round(Number(e.target.value) || 1)); update({ settings: { ...project.settings, pins: { ...project.settings.pins, [s]: v } } }) }} /></label>
           ))}
         </div>
-        {ir.format === 'onnx' && <PinnedDownload project={project} version={version} pins={pins} />}
-        {ir.format === 'onnx' && <Code label="Shell · same result with ONNX Runtime tools" code={cmd} />}
+        {ir.format === 'onnx' && <PinnedDownload project={project} version={version} pins={pins} hasCommand={!!cmd} />}
+        {ir.format === 'onnx' && cmd && <Code label={unnamed ? 'Shell · named dims only, with ONNX Runtime tools' : 'Shell · same result with ONNX Runtime tools'} code={cmd} />}
         {ir.format === 'tflite' && <Code label="Python · re-export with a fixed signature" code={`# Re-convert with concrete input shapes so the interpreter sees no -1 dims\nconverter = tf.lite.TFLiteConverter.from_concrete_functions([\n    model.__call__.get_concrete_function(tf.TensorSpec(${JSON.stringify((a.inputs[0]?.shape ?? []).map(d => typeof d === 'number' ? d : pins[d] ?? 1))}, tf.float32))\n])\nopen(${py(`${out}_static.tflite`)}, "wb").write(converter.convert())`} />}
       </div>
     )
@@ -362,13 +364,13 @@ function FixArtifact({ f, project, version, ir, a, update }: { f: FixId; project
   return <Code label="Python · ONNX Runtime static QDQ for the QNN EP" code={quantSnippet(file, out, ins)} />
 }
 
-function PinnedDownload({ project, version, pins }: { project: Project; version: TabProps['version']; pins: Record<string, number> }) {
+function PinnedDownload({ project, version, pins, hasCommand }: { project: Project; version: TabProps['version']; pins: Record<string, number>; hasCommand: boolean }) {
   const [busy, setBusy] = useState(false)
   const get = async () => {
     setBusy(true)
     try {
       const bytes = project.sampleId ? sampleBytes(version.fileName) : await getFile(version.id).then(b => b ? b.arrayBuffer().then(x => new Uint8Array(x)) : null)
-      if (!bytes) { toast('The original file is not stored on this device. Re-import it, or use the command below.', { tone: 'error', ttl: 7000 }); return }
+      if (!bytes) { toast(`The original file is not stored on this device. Re-import it${hasCommand ? ', or use the command below' : ''}.`, { tone: 'error', ttl: 7000 }); return }
       const fixed = pinDims(bytes, pins)
       download(version.fileName.replace(/\.onnx$/i, '') + '_static.onnx', new Blob([fixed.slice().buffer], { type: 'application/octet-stream' }))
       toast('Downloaded the pinned model', { tone: 'ok' })
