@@ -87,6 +87,7 @@ export function parseGguf(buf: Uint8Array, fileSize = buf.length): ModelIR {
     arch, name: kv['general.name'] as string | undefined,
     contextLength: num('context_length'), blockCount: num('block_count'), embeddingLength: num('embedding_length'),
     headCount: num('attention.head_count'), headCountKv: num('attention.head_count_kv'),
+    keyLength: num('attention.key_length'), valueLength: num('attention.value_length'),
     fileType: typeof kv['general.file_type'] === 'number' ? FILE_TYPES[kv['general.file_type'] as number] : undefined,
     encoder: /bert|t5encoder|clip/i.test(arch) || kv[`${arch}.pooling_type`] !== undefined || undefined,
   }

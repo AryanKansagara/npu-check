@@ -50,6 +50,9 @@ export interface LlmMeta {
   embeddingLength?: number
   headCount?: number
   headCountKv?: number
+  /** Per-head sizes; width / heads when the file does not say */
+  keyLength?: number
+  valueLength?: number
   fileType?: string
   /** Encoder-only (embedding) model: no decode loop or KV cache */
   encoder?: boolean
