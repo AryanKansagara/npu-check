@@ -65,6 +65,8 @@ export function parseOnnx(buf: Uint8Array): ModelIR {
   for (const v of vinfos) if (!ir.tensors[v.name]?.init) ir.tensors[v.name] = v
   // Older exporters list initializers as graph inputs too; those are weights, not inputs.
   ir.inputs = ir.inputs.filter(n => !initNames.has(n))
+  // opset_import is required from IR version 3 on; a file cut right after its graph has none.
+  if (!ir.opset.length && ir.irVersion >= 3) throw new Error('No opset_import after the graph.')
   if (!ir.opset.length) ir.issues.push({ level: 'warn', where: 'model', message: 'No opset_import; assuming the default ONNX domain.' })
   const externals = Object.values(ir.tensors).filter(t => t.external)
   if (externals.length) ir.issues.push({ level: 'info', where: 'initializers', message: `${externals.length} initializers live in external data files (not needed here: sizes come from their dims).` })

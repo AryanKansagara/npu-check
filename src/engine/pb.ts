@@ -61,6 +61,7 @@ export class Reader {
         if (end > this.end) throw new Error(`Field ${no} at byte ${tagStart} runs past the end of its message (${len} bytes declared)`)
         this.pos = end
       } else throw new Error(`Unsupported wire type ${wt} at byte ${tagStart}`)
+      if (end > this.end) throw new Error(`Field ${no} at byte ${tagStart} runs past the end of its message`)
       yield { no, wt, n, start, end, tagStart }
     }
   }

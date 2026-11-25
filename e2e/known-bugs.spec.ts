@@ -8,14 +8,12 @@ const conv = { op: 'Conv', name: 'conv', in: ['h', 'w'], out: ['y'], attrs: { ke
 const w64 = [{ name: 'w', dims: [64, 16, 3, 3] }]
 
 test('a GGUF cut short is refused (#2)', async ({ page }) => {
-  test.fail(true, issue(2))
   const whole = await sampleFile('stories260K.gguf')
   await choose(page, 'cut.gguf', whole.subarray(0, Math.floor(whole.length / 10)))
   await expect(page.getByRole('alert')).toContainText(/cut short|incomplete|truncated/i)
 })
 
 test('wrong content in a model file is explained (#2)', async ({ page }) => {
-  test.fail(true, issue(2))
   await choose(page, 'model.onnx', Buffer.from('version https://git-lfs.github.com/spec/v1\noid sha256:aa\nsize 1\n'))
   await expect(page.getByRole('alert')).toContainText('Git LFS')
 })
