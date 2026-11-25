@@ -90,7 +90,21 @@ function parseNode(r: Reader, f: Field, ctx: Ctx, idx: number): ModelNode {
   }
   if (n.domain === 'ai.onnx') n.domain = ''
   if (!n.name) n.name = `${n.op}_${idx}`
+  if (n.op === 'Constant' && !n.domain && n.outputs[0]) {
+    const t = attrConstant(n.attrs)
+    if (t) ctx.tensors[n.outputs[0]] = { name: n.outputs[0], ...t, init: true }
+  }
   return n
+}
+
+/** Constant nodes can also hold their value in an int, float or string attribute instead of a tensor. */
+function attrConstant(A: ModelNode['attrs']): Pick<TensorInfo, 'dtype' | 'shape' | 'values'> | null {
+  for (const [key, dtype, keep] of [['value_int', 'int64', KEEP_VALUES], ['value_float', 'fp32', 8], ['value_string', 'string', 0]] as const) {
+    const one = A[key], many = A[`${key}s`]
+    if (one !== undefined) return { dtype, shape: [], ...(typeof one === 'number' ? { values: [one] } : {}) }
+    if (Array.isArray(many)) return { dtype, shape: [many.length], ...(many.length <= keep ? { values: many as number[] } : {}) }
+  }
+  return null
 }
 
 function parseAttr(r: Reader, f: Field, node: ModelNode, ctx: Ctx): [string, AttrValue] {

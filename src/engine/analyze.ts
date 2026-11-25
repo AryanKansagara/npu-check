@@ -195,12 +195,15 @@ function inferNode(n: ModelNode, ins: (Dim[] | null)[], val: (n: string) => Dim[
       const k = ints(A.kernel_shape) ?? (w ? w.slice(2) as number[] : Array(sp).fill(1))
       const st = ints(A.strides) ?? Array(sp).fill(1), dil = ints(A.dilations) ?? Array(sp).fill(1)
       const pads = ints(A.pads) ?? Array(sp * 2).fill(0)
+      const outPad = ints(A.output_padding) ?? [], outShape = ints(A.output_shape)?.slice(-sp)
       const ap = typeof A.auto_pad === 'string' ? A.auto_pad : 'NOTSET'
       const cOut: Dim = n.op === 'MaxPool' || n.op === 'AveragePool' || n.op === 'QLinearAveragePool' ? a![1] : n.op === 'ConvTranspose' ? (w ? (w[1] as number) * (typeof A.group === 'number' ? A.group : 1) : '?') : w ? w[0] : '?'
       const spatial = a!.slice(2).map((x, i) => {
+        if (n.op === 'ConvTranspose' && outShape?.length === sp) return outShape[i]
         const kk = (dil[i] ?? 1) * ((k[i] as number) - 1) + 1
-        if (typeof x !== 'number') return st[i] === 1 && (ap.startsWith('SAME') || pads[i] + pads[i + sp] === kk - 1) ? x : '?'
-        if (n.op === 'ConvTranspose') return (st[i] ?? 1) * (x - 1) + kk - pads[i] - pads[i + sp]
+        if (typeof x !== 'number') return st[i] === 1 && (ap.startsWith('SAME') || pads[i] + pads[i + sp] === kk - 1 + (outPad[i] ?? 0)) ? x : '?'
+        if (n.op === 'ConvTranspose' && ap.startsWith('SAME')) return (st[i] ?? 1) * x
+        if (n.op === 'ConvTranspose') return (st[i] ?? 1) * (x - 1) + (outPad[i] ?? 0) + kk - pads[i] - pads[i + sp]
         if (ap.startsWith('SAME')) return Math.ceil(x / (st[i] ?? 1))
         const ceil = A.ceil_mode === 1 ? Math.ceil : Math.floor
         return ceil((x + pads[i] + pads[i + sp] - kk) / (st[i] ?? 1)) + 1
@@ -274,10 +277,13 @@ function inferNode(n: ModelNode, ins: (Dim[] | null)[], val: (n: string) => Dim[
     case 'Split': {
       const ax = ((A.axis as number) ?? 0) < 0 ? (A.axis as number) + a!.length : (A.axis as number) ?? 0
       const parts = ints(A.split) ?? v(1)
+      const d = a![ax], count = n.outputs.length
+      // Only num_outputs (opset 18) allows an uneven split: equal chunks, the last one smaller.
+      const chunk = typeof d !== 'number' ? 0 : A.num_outputs === count ? Math.ceil(d / count) : d / count
       return n.outputs.map((_, k) => {
         const o = [...a!]
-        const d = a![ax]
-        o[ax] = parts ? parts[k] : typeof d === 'number' ? d / n.outputs.length : '?'
+        const last = k === count - 1 && typeof d === 'number' ? d - chunk * (count - 1) : chunk
+        o[ax] = parts ? parts[k] : typeof d === 'number' && last >= 0 ? last : '?'
         return o
       })
     }
@@ -287,16 +293,20 @@ function inferNode(n: ModelNode, ins: (Dim[] | null)[], val: (n: string) => Dim[
       return [[...a!.slice(0, ax), ...idx, ...a!.slice(ax + 1)]]
     }
     case 'Slice': {
-      const starts = v(1), ends = v(2), axes = v(3), steps = v(4)
-      if (!starts || !ends) return [a!.map(() => '?')]
+      // Opset 1 to 9 carries starts, ends and axes as attributes.
+      const starts = n.inputs[1] ? v(1) : ints(A.starts), ends = n.inputs[2] ? v(2) : ints(A.ends), axes = n.inputs[3] ? v(3) : ints(A.axes), steps = v(4)
+      if (!starts || !ends || (n.inputs[3] && !axes) || (n.inputs[4] && !steps)) return [a!.map(() => '?')]
       const out = [...a!]
       starts.forEach((s, k) => {
         const ax0 = axes ? axes[k] : k
         const ax = ax0 < 0 ? ax0 + a!.length : ax0
         const d = a![ax], st = steps?.[k] ?? 1
         if (typeof d !== 'number') { out[ax] = '?'; return }
-        const clamp = (x: number) => Math.min(Math.max(x < 0 ? x + d : x, 0), d)
-        out[ax] = Math.max(0, Math.ceil((clamp(ends[k]) - clamp(s)) / st))
+        if (!st) { out[ax] = '?'; return }
+        // Backwards, positions run from d-1 down to -1 (one before the first element).
+        const clamp = (x: number, lo: number, hi: number) => Math.min(Math.max(x < 0 ? x + d : x, lo), hi)
+        const from = st > 0 ? clamp(s, 0, d) : clamp(s, 0, d - 1), to = st > 0 ? clamp(ends[k], 0, d) : clamp(ends[k], -1, d - 1)
+        out[ax] = Math.max(0, Math.ceil((to - from) / st))
       })
       return [out]
     }
@@ -322,7 +332,12 @@ function inferNode(n: ModelNode, ins: (Dim[] | null)[], val: (n: string) => Dim[
     case 'Tile': { const r = v(1); return [r ? a!.map((d, i) => typeof d === 'number' ? d * r[i] : '?') : null] }
     case 'Pad': {
       const p = ints(A.pads) ?? v(1)
-      return [p ? a!.map((d, i) => typeof d === 'number' ? d + p[i] + p[i + a!.length] : '?') : null]
+      // Opset 18: pads only for these axes, in this order.
+      const axes = n.inputs[3] ? v(3)?.map(x => x < 0 ? x + a!.length : x) : a!.map((_, i) => i)
+      if (!p || !axes || p.length !== axes.length * 2) return [null]
+      const out = [...a!]
+      axes.forEach((ax, k) => { const d = out[ax]; out[ax] = typeof d === 'number' ? d + p[k] + p[k + axes.length] : '?' })
+      return [out]
     }
     case 'DepthToSpace': case 'SpaceToDepth': {
       const b = (A.blocksize as number) ?? 1
