@@ -48,7 +48,6 @@ test('a cycle is reported at import (#4)', async ({ page }) => {
 })
 
 test('unknown shapes are reported and lower the score (#5)', async ({ page }) => {
-  test.fail(true, issue(5))
   await importModel(page, 'unknown.onnx', small([{ op: 'GatherND', name: 'gn', in: ['x', 'i'], out: ['g'] }, { op: 'Relu', name: 'r', in: ['g'], out: ['y'] }], {
     inits: [{ name: 'i', dims: [1, 1], ints: [0] }], outputs: [{ name: 'y', shape: [] }] }))
   await expect(finding(page, /unknown shape/i)).toContainText('gn')

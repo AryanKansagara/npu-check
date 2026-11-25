@@ -3,7 +3,7 @@ import { FIX_LABELS, fmtBytes } from './engine/analyze.ts'
 import { SOURCES, TABLE_DATE } from './engine/support.ts'
 import { useAnalysis, useProject } from './projectData.ts'
 import { shapeStr } from './Tabs.tsx'
-import { Empty, fmtDate, fmtMs, fmtN, fmtSi, Link } from './ui.tsx'
+import { atLeast, Empty, fmtDate, fmtMs, fmtN, fmtSi, Link } from './ui.tsx'
 
 export default function Report({ id }: { id: string }) {
   const { loading, project, version, ir } = useProject(id)
@@ -23,11 +23,11 @@ export default function Report({ id }: { id: string }) {
       </header>
       <div className="kpis">
         <div className="kpi"><small>Readiness</small><b>{a.score}/100</b></div>
-        <div className="kpi"><small>Est. latency</small><b>{a.latency.tokensPerSec ? `${a.latency.tokensPerSec.toFixed(1)} tok/s` : fmtMs(a.latency.totalMs)}</b></div>
+        <div className="kpi"><small>Est. latency</small><b>{a.latency.tokensPerSec ? `${a.latency.tokensPerSec.toFixed(1)} tok/s` : atLeast(a.unknownNodes, fmtMs(a.latency.totalMs))}</b></div>
         <div className="kpi"><small>Partitions</small><b>{a.partitions}</b><p>{a.switches} switches</p></div>
         <div className="kpi"><small>Parameters</small><b>{fmtSi(a.params)}</b><p>{fmtBytes(a.weightBytes)}</p></div>
-        <div className="kpi"><small>MACs</small><b>{fmtSi(a.macs)}</b></div>
-        <div className="kpi"><small>Peak activations</small><b>{fmtBytes(a.peakBytes)}</b></div>
+        <div className="kpi"><small>MACs</small><b>{atLeast(a.unknownNodes, fmtSi(a.macs))}</b></div>
+        <div className="kpi"><small>Peak activations</small><b>{atLeast(a.unknownNodes, fmtBytes(a.peakBytes))}</b></div>
       </div>
       <h2>Findings</h2>
       {a.findings.length ? <ol>{a.findings.map(f => <li key={f.id}><b>{f.title}.</b> {f.detail}</li>)}</ol> : <p>No blockers found.</p>}

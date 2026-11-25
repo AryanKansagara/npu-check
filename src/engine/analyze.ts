@@ -356,6 +356,8 @@ export interface NodeResult {
   flops: number
   outShape: Dim[] | null
   ms: number
+  /** Runs, but its shapes could not be worked out: macs, flops and ms are not known */
+  unknown?: boolean
 }
 
 export interface OpRow { op: string; domain: string; count: number; support: Support; npu: number; cpu: number; macs: number; note: string; replace?: string }
@@ -389,6 +391,8 @@ export interface Analysis {
   largest: { name: string; bytes: number } | null
   npuNodes: number
   cpuNodes: number
+  /** Runtime nodes whose cost is not known; totals are lower bounds when this is not 0 */
+  unknownNodes: number
   npuPartitions: number
   cpuPartitions: number
   partitions: number
@@ -500,12 +504,16 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
     }
   }
 
+  // A shape with fractional or NaN dims is as unusable as none.
+  const known = (s: Dim[] | null | undefined) => !!s && s.every(d => typeof d === 'string' || Number.isInteger(d))
   const isDyn = (s: Dim[] | null | undefined) => !!s && s.some(d => typeof d === 'string')
   const nodes: NodeResult[] = ir.nodes.map((n, i) => {
     const r = rule(n.op, n.domain)
     const outShape = numShapes[n.outputs[0]] ?? null
     const { macs, flops } = cost(n, numShapes, ir)
-    const base = { index: i, name: n.name, op: n.op, support: r.status, macs, flops, outShape: checkShapes[n.outputs[0]] ?? outShape, ms: 0 }
+    const firstOut = n.outputs.find(o => o)
+    const unknown = ir.format !== 'gguf' && !folded.has(i) && !tail.has(i) && !!firstOut && !known(numShapes[firstOut])
+    const base = { index: i, name: n.name, op: n.op, support: r.status, unknown, macs, flops, outShape: checkShapes[n.outputs[0]] ?? outShape, ms: 0 }
     if (tail.has(i)) return { ...base, status: 'removed' as const, reason: 'Moved to CPU post-processing outside the NPU graph.' }
     if (folded.has(i)) return { ...base, macs: 0, flops: 0, status: 'npu' as const, reason: n.op === 'Constant' ? 'Constant, folded.' : 'Computed from constants only; folded at conversion.' }
     if (r.status === 'cpu') {
@@ -522,7 +530,7 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
       const bad = constraintViolation(n, numShapes, ir)
       if (bad) return { ...base, status: 'cpu' as const, reason: bad }
     }
-    return { ...base, status: 'npu' as const, reason: r.note }
+    return { ...base, status: 'npu' as const, reason: unknown ? `${r.note} Output shape unknown, so a fixed shape and the cost are not confirmed.` : r.note }
   })
 
   // Partitions: connected components of same-status nodes; switches: tensors crossing the boundary.
@@ -646,7 +654,7 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
     params, weightBytes, externalBytes, dtypes,
     macs: nodes.reduce((s, n) => s + n.macs, 0), flops: nodes.reduce((s, n) => s + n.flops, 0),
     peakBytes, peakAt, largest,
-    npuNodes: nodes.filter(n => n.status === 'npu' && !folded.has(n.index)).length, cpuNodes: nodes.filter(n => n.status === 'cpu').length,
+    npuNodes: nodes.filter(n => n.status === 'npu' && !folded.has(n.index)).length, cpuNodes: nodes.filter(n => n.status === 'cpu').length, unknownNodes: nodes.filter(n => n.unknown).length,
     npuPartitions, cpuPartitions, partitions: npuPartitions + cpuPartitions, switches,
     quant: { qdq, qlinear, perChannel, intWeightShare, verdict, precision, fakeQuantParams },
     latency, findings: [], available: [], score: 0, symbols: syms,
@@ -729,6 +737,10 @@ function findings(ir: ModelIR, a: Analysis, opts: Options, pins: Record<string, 
     const syms = [...new Set(dynIn.flatMap(i => i.dynamic))]
     f.push({ id: 'dynamic', severity: 'blocker', title: `Dynamic input shapes: ${syms.join(', ')}`, detail: `${dynIn.map(i => i.name).join(', ')} ${dynIn.length > 1 ? 'have' : 'has'} symbolic dims. NPU graphs are compiled for fixed shapes, so every node downstream falls back. Pin them (${syms.map(s => `${s}=${pins[s]}`).join(', ')}) and export one model per shape bucket if you need several.`, fix: 'pin-dims', nodes: a.nodes.filter(n => n.reason.startsWith('Dynamic')).map(n => n.name) })
   }
+  if (a.unknownNodes) {
+    const unk = a.nodes.filter(n => n.unknown)
+    f.push({ id: 'unknown-shapes', severity: 'warn', title: `${unk.length} node${unk.length > 1 ? 's have' : ' has'} an unknown shape`, detail: `Shapes could not be worked out from ${unk[0].name} (${unk[0].op}) on, so MACs, latency and peak memory are lower bounds that leave these nodes out, and their placement is not confirmed. Run onnx.shape_inference.infer_shapes on the file and import it again.`, nodes: unk.map(n => n.name) })
+  }
   const unsupported = a.nodes.filter(n => n.status === 'cpu' && n.support === 'cpu')
   const byOp = new Map<string, string[]>()
   unsupported.forEach(n => byOp.set(n.op, [...(byOp.get(n.op) ?? []), n.name]))
@@ -759,7 +771,8 @@ function findings(ir: ModelIR, a: Analysis, opts: Options, pins: Record<string, 
 function score(ir: ModelIR, a: Analysis): number {
   if (a.format === 'gguf') return a.dtypes.int4.params + a.dtypes.int8.params > a.params / 2 ? 70 : 45
   const total = Math.max(1, a.npuNodes + a.cpuNodes)
-  let s = 100 * a.npuNodes / total
+  const confirmed = a.npuNodes - a.nodes.filter(n => n.unknown && n.status === 'npu').length
+  let s = 100 * confirmed / total
   s -= Math.min(20, Math.max(0, a.partitions - 1) * 5)
   if (a.quant.precision !== 'int8') s -= 15
   if (a.findings.some(f => f.id === 'activations')) s -= 5
@@ -780,7 +793,7 @@ export function opReportCsv(a: Analysis): string {
 
 export function nodeReportCsv(a: Analysis): string {
   const head = ['index', 'name', 'op', 'placement', 'reason', 'output_shape', 'macs', 'est_ms']
-  return [head.join(','), ...a.nodes.map(n => [n.index, n.name, n.op, n.status, n.reason, (n.outShape ?? []).join('x'), Math.round(n.macs), n.ms.toFixed(4)].map(csvCell).join(','))].join('\n') + '\n'
+  return [head.join(','), ...a.nodes.map(n => [n.index, n.name, n.op, n.status, n.reason, (n.outShape ?? []).join('x'), n.unknown ? '' : Math.round(n.macs), n.unknown ? '' : n.ms.toFixed(4)].map(csvCell).join(','))].join('\n') + '\n'
 }
 
 // ---------- Version summaries and comparison ----------
