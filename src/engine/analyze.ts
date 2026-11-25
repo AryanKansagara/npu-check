@@ -683,8 +683,10 @@ export function cost(n: ModelNode, S: Record<string, Dim[] | null>, ir: ModelIR)
     const w = S[n.inputs[n.op === 'QLinearConv' ? 3 : 1]]
     if (w && out) {
       const wN = numel(w)
-      const cOut = tflite ? (n.attrs.depthwise ? w[3] : w[0]) : n.op === 'ConvTranspose' ? (w[1] as number) * ((n.attrs.group as number) || 1) : w[0]
-      if (n.op === 'ConvTranspose') macs = numel(S[n.inputs[0]]) * wN / numel([w[0]])
+      // TFLite weights: CONV_2D [out,h,w,in], DEPTHWISE [1,h,w,out], CONV_3D [d,h,w,in,out], TRANSPOSE_CONV [out,h,w,in].
+      const cOut = tflite ? (n.attrs.depthwise ? w[3] : w.length === 5 ? w[4] : w[0]) : n.op === 'ConvTranspose' ? (w[1] as number) * ((n.attrs.group as number) || 1) : w[0]
+      // Every input element meets all weights of its channel. TFLite inputs are output_shape, weights, data.
+      if (n.op === 'ConvTranspose') macs = tflite ? numel(S[n.inputs[2]]) * wN / Math.max(1, numel([w[3]])) : numel(S[n.inputs[0]]) * wN / numel([w[0]])
       else macs = outN * wN / Math.max(1, typeof cOut === 'number' ? cOut : 1)
     }
   } else if (n.op === 'MatMul' || n.op === 'QLinearMatMul' || n.op === 'MatMulInteger' || n.op === 'FusedMatMul') {
