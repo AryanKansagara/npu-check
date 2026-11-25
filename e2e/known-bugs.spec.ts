@@ -106,7 +106,6 @@ test('fp16 intermediates count two bytes (#13)', async ({ page }) => {
 })
 
 test('TFLite weights with the same name are both counted (#14)', async ({ page }) => {
-  test.fail(true, issue(14))
   await importModel(page, 'dup.tflite', tflite(0, [{ name: 'w', shape: [1000], weight: 4000 }, { name: 'w', shape: [1000], weight: 4000 }, { name: 'x', shape: [1000] }, { name: 'y', shape: [1000] }], { in: [0, 1], out: [3] }, { in: [2], out: [3] }))
   await expect(kpi(page, 'Parameters').locator('b')).toHaveText('2.0K')
 })
