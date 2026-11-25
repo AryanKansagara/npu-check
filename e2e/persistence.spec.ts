@@ -54,7 +54,10 @@ test('projects can be renamed, deleted and restored with their graph', async ({ 
   await page.getByRole('button', { name: 'Rename' }).click()
   await page.getByLabel('Project name').fill('Doorbell camera')
   await page.keyboard.press('Enter')
+  // The card shows the new name once it is stored.
+  await expect(page.getByRole('link', { name: 'Doorbell camera' })).toBeVisible()
   await page.reload()
+  await expect(page.getByRole('link', { name: 'Doorbell camera' })).toBeVisible()
   await page.getByRole('button', { name: 'Delete' }).click()
   await page.getByRole('button', { name: 'Delete project' }).click()
   await expect(page.getByRole('link', { name: 'Doorbell camera' })).toHaveCount(0)
