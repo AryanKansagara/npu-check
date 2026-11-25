@@ -19,7 +19,6 @@ test('wrong content in a model file is explained (#2)', async ({ page }) => {
 })
 
 test('a hostile dim name stays inside one shell argument (#3)', async ({ page }) => {
-  test.fail(true, issue(3))
   await importModel(page, 'model (1).onnx', onnx({ inputs: [{ name: 'x', shape: ['seq; touch /tmp/x #', 4] }], outputs: [{ name: 'y', shape: ['seq; touch /tmp/x #', 4] }], nodes: [{ op: 'Relu', in: ['x'], out: ['y'] }] }))
   await tab(page, 'Fixes').click()
   const cmd = await copyCode(page, /^Shell/)
@@ -28,7 +27,6 @@ test('a hostile dim name stays inside one shell argument (#3)', async ({ page })
 })
 
 test('a hostile input name stays inside its Python string (#3)', async ({ page }) => {
-  test.fail(true, issue(3))
   const name = 'x": print("hi"), "y'
   await importModel(page, 'm.onnx', onnx({ inputs: [{ name, shape: [1, 4] }], outputs: [{ name: 'y', shape: [1, 4] }], nodes: [{ op: 'Relu', in: [name], out: ['y'] }] }))
   await tab(page, 'Fixes').click()
