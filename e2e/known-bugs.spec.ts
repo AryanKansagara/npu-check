@@ -1,9 +1,7 @@
-// Each test states the correct behaviour and is expected to fail until its issue is fixed. When the fix lands,
-// Playwright reports "expected to fail, but passed": remove the test.fail line.
+// Bugs that were fixed, by issue number. Each test states the correct behaviour.
 import { choose, copyCode, expect, fact, finding, importModel, kpi, nodeCsv, openSample, sampleFile, save, tab, test } from './harness.ts'
 import { gguf, handWorked, llm, onnx, small, tflite } from './files.ts'
 
-const issue = (n: number) => `https://github.com/AryanKansagara/npu-check/issues/${n}`
 const conv = { op: 'Conv', name: 'conv', in: ['h', 'w'], out: ['y'], attrs: { kernel_shape: [3, 3], pads: [1, 1, 1, 1] } }
 const w64 = [{ name: 'w', dims: [64, 16, 3, 3] }]
 
@@ -66,7 +64,6 @@ test('TFLite TRANSPOSE_CONV MACs come from the data input (#7)', async ({ page }
 })
 
 test('a node name that looks like a formula is exported as text (#8)', async ({ page }) => {
-  test.fail(true, issue(8))
   await importModel(page, 'formula.onnx', handWorked('=1+2'))
   expect((await nodeCsv(page))[0].name).toBe("'=1+2")
 })
