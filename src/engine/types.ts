@@ -68,6 +68,8 @@ export interface ModelIR {
   issues: Issue[]
   meta: Record<string, string>
   fileSize: number
+  /** Bytes the file must have for the data it declares (GGUF tensor table) */
+  requiredSize?: number
   llm?: LlmMeta
 }
 
