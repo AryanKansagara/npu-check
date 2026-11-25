@@ -191,8 +191,9 @@ function parseValueInfo(r: Reader, f: Field): TensorInfo {
             for (const d of sh.fields()) {
               if (d.no !== 1) continue
               const dm = sh.sub(d)
+              // Some exporters write -1 for a size they do not know.
               let dim: Dim = '?'
-              for (const x of dm.fields()) { if (x.no === 1) dim = x.n; else if (x.no === 2) dim = dm.str(x) || '?' }
+              for (const x of dm.fields()) { if (x.no === 1) dim = x.n < 0 ? '?' : x.n; else if (x.no === 2) dim = dm.str(x) || '?' }
               t.shape.push(dim)
             }
           }
@@ -331,11 +332,11 @@ export function buildOnnx(g: BuildGraph): Uint8Array {
  * Same idea as onnxruntime.tools.make_dynamic_shape_fixed.
  */
 export function pinDims(buf: Uint8Array, pins: Record<string, number>): Uint8Array {
-  // Unnamed dims (no dim_value, no dim_param) are pinned through the '?' key, on graph inputs only.
+  // Unnamed dims (no dim_param, and no dim_value or a negative one) are pinned through the '?' key, on graph inputs only.
   const dimFix = (b: Uint8Array, f: Field, anon: boolean) => {
     const r = new Reader(b, f.start, f.end)
     let param = '', hasValue = false
-    for (const x of r.fields()) { if (x.no === 2) param = r.str(x); else if (x.no === 1) hasValue = true }
+    for (const x of r.fields()) { if (x.no === 2) param = r.str(x); else if (x.no === 1) hasValue = x.n >= 0 }
     if (!param && !hasValue && anon && '?' in pins) return new Writer().int(1, pins['?']).finish()
     return param in pins ? new Writer().int(1, pins[param]).finish() : null
   }
