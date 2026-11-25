@@ -121,14 +121,22 @@ export function inferShapes(ir: ModelIR, pins?: Record<string, number>, order = 
   // Shape-valued tensors computed in the graph (Shape -> Gather -> Concat -> Reshape) are tracked so Reshape targets resolve.
   const V: Record<string, Dim[]> = {}
   const val = (n: string): Dim[] | undefined => ir.tensors[n]?.values ?? V[n]
-  const declared = (o: string) => { const d = ir.tensors[o]?.shape; return !!d && !d.includes('?') }
+  // Symbols that no graph input carries (onnx.shape_inference writes unk__0, unk__1, ...) have no pin: their values follow from the inputs.
+  const inputSyms = new Set<Dim>(ir.inputs.flatMap(n => ir.tensors[n]?.shape ?? []))
+  const firm = (d: Dim) => typeof d === 'number' || !pins || inputSyms.has(d)
+  const declared = (o: string) => { const d = ir.tensors[o]?.shape; return !!d && !d.includes('?') && d.every(firm) }
+  const merge = (o: string, inferred: Dim[] | null | undefined): Dim[] | null => {
+    const d = ir.tensors[o]?.shape, fallback = S[o] ?? null
+    if (!d || d.includes('?') || !fallback) return inferred ?? fallback
+    return inferred?.length !== d.length ? fallback : fallback.map((x, i) => !firm(d[i]) && typeof inferred[i] === 'number' ? inferred[i] : x)
+  }
   for (const i of order) {
     const n = ir.nodes[i]
     const ins = n.inputs.map(x => x ? S[x] ?? null : null)
     if (!n.outputs.every(o => !o || declared(o))) {
       const out = inferNode(n, ins, val, S)
       // A declared shape with unknown dims is kept only when inference cannot do better.
-      n.outputs.forEach((o, k) => { if (o && !declared(o)) S[o] = out[k] ?? S[o] ?? null })
+      n.outputs.forEach((o, k) => { if (o && !declared(o)) S[o] = merge(o, out[k]) })
     }
     const v = foldValue(n, ins, val)
     if (v && v.length <= 64 && n.outputs[0]) V[n.outputs[0]] = v
@@ -356,6 +364,8 @@ export interface NodeResult {
   flops: number
   outShape: Dim[] | null
   ms: number
+  /** Runs, but its shapes could not be worked out: macs, flops and ms are not known */
+  unknown?: boolean
 }
 
 export interface OpRow { op: string; domain: string; count: number; support: Support; npu: number; cpu: number; macs: number; note: string; replace?: string }
@@ -389,6 +399,8 @@ export interface Analysis {
   largest: { name: string; bytes: number } | null
   npuNodes: number
   cpuNodes: number
+  /** Runtime nodes whose cost is not known; totals are lower bounds when this is not 0 */
+  unknownNodes: number
   npuPartitions: number
   cpuPartitions: number
   partitions: number
@@ -500,12 +512,16 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
     }
   }
 
+  // A shape with fractional or NaN dims is as unusable as none.
+  const known = (s: Dim[] | null | undefined) => !!s && s.every(d => typeof d === 'string' || Number.isInteger(d))
   const isDyn = (s: Dim[] | null | undefined) => !!s && s.some(d => typeof d === 'string')
   const nodes: NodeResult[] = ir.nodes.map((n, i) => {
     const r = rule(n.op, n.domain)
     const outShape = numShapes[n.outputs[0]] ?? null
     const { macs, flops } = cost(n, numShapes, ir)
-    const base = { index: i, name: n.name, op: n.op, support: r.status, macs, flops, outShape: checkShapes[n.outputs[0]] ?? outShape, ms: 0 }
+    const firstOut = n.outputs.find(o => o)
+    const unknown = ir.format !== 'gguf' && !folded.has(i) && !tail.has(i) && !!firstOut && !known(numShapes[firstOut])
+    const base = { index: i, name: n.name, op: n.op, support: r.status, unknown, macs, flops, outShape: checkShapes[n.outputs[0]] ?? outShape, ms: 0 }
     if (tail.has(i)) return { ...base, status: 'removed' as const, reason: 'Moved to CPU post-processing outside the NPU graph.' }
     if (folded.has(i)) return { ...base, macs: 0, flops: 0, status: 'npu' as const, reason: n.op === 'Constant' ? 'Constant, folded.' : 'Computed from constants only; folded at conversion.' }
     if (r.status === 'cpu') {
@@ -522,7 +538,7 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
       const bad = constraintViolation(n, numShapes, ir)
       if (bad) return { ...base, status: 'cpu' as const, reason: bad }
     }
-    return { ...base, status: 'npu' as const, reason: r.note }
+    return { ...base, status: 'npu' as const, reason: unknown ? `${r.note} Output shape unknown, so a fixed shape and the cost are not confirmed.` : r.note }
   })
 
   // Partitions: connected components of same-status nodes; switches: tensors crossing the boundary.
@@ -646,14 +662,14 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
     params, weightBytes, externalBytes, dtypes,
     macs: nodes.reduce((s, n) => s + n.macs, 0), flops: nodes.reduce((s, n) => s + n.flops, 0),
     peakBytes, peakAt, largest,
-    npuNodes: nodes.filter(n => n.status === 'npu' && !folded.has(n.index)).length, cpuNodes: nodes.filter(n => n.status === 'cpu').length,
+    npuNodes: nodes.filter(n => n.status === 'npu' && !folded.has(n.index)).length, cpuNodes: nodes.filter(n => n.status === 'cpu').length, unknownNodes: nodes.filter(n => n.unknown).length,
     npuPartitions, cpuPartitions, partitions: npuPartitions + cpuPartitions, switches,
     quant: { qdq, qlinear, perChannel, intWeightShare, verdict, precision, fakeQuantParams },
     latency, findings: [], available: [], score: 0, symbols: syms,
   }
   out.findings = findings(ir, out, opts, pins, floatParams)
   out.available = [...new Set(out.findings.map(f => f.fix).filter((f): f is FixId => !!f))]
-  out.score = score(out)
+  out.score = score(ir, out)
   return out
 }
 
@@ -683,8 +699,10 @@ export function cost(n: ModelNode, S: Record<string, Dim[] | null>, ir: ModelIR)
     const w = S[n.inputs[n.op === 'QLinearConv' ? 3 : 1]]
     if (w && out) {
       const wN = numel(w)
-      const cOut = tflite ? (n.attrs.depthwise ? w[3] : w[0]) : n.op === 'ConvTranspose' ? (w[1] as number) * ((n.attrs.group as number) || 1) : w[0]
-      if (n.op === 'ConvTranspose') macs = numel(S[n.inputs[0]]) * wN / numel([w[0]])
+      // TFLite weights: CONV_2D [out,h,w,in], DEPTHWISE [1,h,w,out], CONV_3D [d,h,w,in,out], TRANSPOSE_CONV [out,h,w,in].
+      const cOut = tflite ? (n.attrs.depthwise ? w[3] : w.length === 5 ? w[4] : w[0]) : n.op === 'ConvTranspose' ? (w[1] as number) * ((n.attrs.group as number) || 1) : w[0]
+      // Every input element meets all weights of its channel. TFLite inputs are output_shape, weights, data.
+      if (n.op === 'ConvTranspose') macs = tflite ? numel(S[n.inputs[2]]) * wN / Math.max(1, numel([w[3]])) : numel(S[n.inputs[0]]) * wN / numel([w[0]])
       else macs = outN * wN / Math.max(1, typeof cOut === 'number' ? cOut : 1)
     }
   } else if (n.op === 'MatMul' || n.op === 'QLinearMatMul' || n.op === 'MatMulInteger' || n.op === 'FusedMatMul') {
@@ -729,6 +747,10 @@ function findings(ir: ModelIR, a: Analysis, opts: Options, pins: Record<string, 
     const syms = [...new Set(dynIn.flatMap(i => i.dynamic))]
     f.push({ id: 'dynamic', severity: 'blocker', title: `Dynamic input shapes: ${syms.join(', ')}`, detail: `${dynIn.map(i => i.name).join(', ')} ${dynIn.length > 1 ? 'have' : 'has'} symbolic dims. NPU graphs are compiled for fixed shapes, so every node downstream falls back. Pin them (${syms.map(s => `${s}=${pins[s]}`).join(', ')}) and export one model per shape bucket if you need several.`, fix: 'pin-dims', nodes: a.nodes.filter(n => n.reason.startsWith('Dynamic')).map(n => n.name) })
   }
+  if (a.unknownNodes) {
+    const unk = a.nodes.filter(n => n.unknown)
+    f.push({ id: 'unknown-shapes', severity: 'warn', title: `${unk.length} node${unk.length > 1 ? 's have' : ' has'} an unknown shape`, detail: `Shapes could not be worked out from ${unk[0].name} (${unk[0].op}) on, so MACs, latency and peak memory are lower bounds that leave these nodes out, and their placement is not confirmed. Run onnx.shape_inference.infer_shapes on the file and import it again.`, nodes: unk.map(n => n.name) })
+  }
   const unsupported = a.nodes.filter(n => n.status === 'cpu' && n.support === 'cpu')
   const byOp = new Map<string, string[]>()
   unsupported.forEach(n => byOp.set(n.op, [...(byOp.get(n.op) ?? []), n.name]))
@@ -752,18 +774,21 @@ function findings(ir: ModelIR, a: Analysis, opts: Options, pins: Record<string, 
   if (big.length) f.push({ id: 'activations', severity: 'warn', title: `${big.length} activation${big.length > 1 ? 's' : ''} larger than ${opts.device.vtcmMB} MB of NPU scratch`, detail: `Largest: ${big.sort((x, y) => y.b - x.b)[0].n.name} at ${fmtBytes(big[0].b)}. Tensors that do not fit spill to DRAM and become bandwidth-bound; tile the input or reduce resolution.`, nodes: big.map(x => x.n.name) })
   if (a.opset !== null && a.opset < 13) f.push({ id: 'opset', severity: 'info', title: `Old opset ${a.opset}`, detail: 'Converters are tested most against opset 13 to 20. Re-export with opset_version=17 to avoid legacy op semantics.' })
   if (a.externalBytes) f.push({ id: 'external', severity: 'info', title: `${fmtBytes(a.externalBytes)} of weights in external data`, detail: 'Required above 2 GB and common for smaller exports too. Keep the .data file next to the .onnx when converting; it is not needed for this inspection.' })
-  for (const i of ir.issues.filter(x => x.level === 'error').slice(0, 5)) f.push({ id: `issue-${i.where}`, severity: 'warn', title: `Graph issue at ${i.where}`, detail: i.message })
+  for (const i of ir.issues.filter(x => x.level === 'error').slice(0, 5)) f.push({ id: `issue-${i.where}`, severity: 'blocker', title: `Graph issue at ${i.where}`, detail: i.message })
   return f
 }
 
-function score(a: Analysis): number {
+function score(ir: ModelIR, a: Analysis): number {
   if (a.format === 'gguf') return a.dtypes.int4.params + a.dtypes.int8.params > a.params / 2 ? 70 : 45
   const total = Math.max(1, a.npuNodes + a.cpuNodes)
-  let s = 100 * a.npuNodes / total
+  const confirmed = a.npuNodes - a.nodes.filter(n => n.unknown && n.status === 'npu').length
+  let s = 100 * confirmed / total
   s -= Math.min(20, Math.max(0, a.partitions - 1) * 5)
   if (a.quant.precision !== 'int8') s -= 15
   if (a.findings.some(f => f.id === 'activations')) s -= 5
-  return Math.max(0, Math.min(100, Math.round(s)))
+  // A runtime refuses a structurally invalid graph, whatever the rest looks like.
+  const top = ir.issues.some(i => i.level === 'error') ? 40 : 100
+  return Math.max(0, Math.min(top, Math.round(s)))
 }
 
 // ---------- Reports ----------
@@ -778,7 +803,7 @@ export function opReportCsv(a: Analysis): string {
 
 export function nodeReportCsv(a: Analysis): string {
   const head = ['index', 'name', 'op', 'placement', 'reason', 'output_shape', 'macs', 'est_ms']
-  return [head.join(','), ...a.nodes.map(n => [n.index, n.name, n.op, n.status, n.reason, (n.outShape ?? []).join('x'), Math.round(n.macs), n.ms.toFixed(4)].map(csvCell).join(','))].join('\n') + '\n'
+  return [head.join(','), ...a.nodes.map(n => [n.index, n.name, n.op, n.status, n.reason, (n.outShape ?? []).join('x'), n.unknown ? '' : Math.round(n.macs), n.unknown ? '' : n.ms.toFixed(4)].map(csvCell).join(','))].join('\n') + '\n'
 }
 
 // ---------- Version summaries and comparison ----------

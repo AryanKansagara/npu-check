@@ -63,18 +63,24 @@ export function parseGguf(buf: Uint8Array, fileSize = buf.length): ModelIR {
   for (let i = 0; i < nKv; i++) { const k = str(); kv[k] = value(u32()) }
   const tensors: Record<string, TensorInfo> = {}
   const issues: Issue[] = []
+  let dataEnd = 0
   for (let i = 0; i < nTensors; i++) {
     const name = str()
     const nd = u32()
     const dims: number[] = []
     for (let d = 0; d < nd; d++) dims.push(u64())
     const type = u32()
-    u64() // offset
+    const offset = u64()
     const t = GGML_TYPES[type]
     if (!t) issues.push({ level: 'warn', where: `tensor ${name}`, message: `Unknown ggml type ${type}; size estimated as 1 byte per weight.` })
     const numel = dims.reduce((a, b) => a * b, 1)
-    tensors[name] = { name, dtype: `ggml:${t?.[0] ?? type}`, shape: dims.slice().reverse(), init: true, bytes: t ? Math.ceil(numel / t[1]) * t[2] : numel }
+    const bytes = t ? Math.ceil(numel / t[1]) * t[2] : numel
+    dataEnd = Math.max(dataEnd, offset + (t ? bytes : 0))
+    tensors[name] = { name, dtype: `ggml:${t?.[0] ?? type}`, shape: dims.slice().reverse(), init: true, bytes }
   }
+  // Offsets count from the end of this header, rounded up to the alignment.
+  const align = typeof kv['general.alignment'] === 'number' && kv['general.alignment'] > 0 ? kv['general.alignment'] : 32
+  const requiredSize = nTensors ? Math.ceil(p / align) * align + dataEnd : p
   const arch = String(kv['general.architecture'] ?? 'unknown')
   const num = (k: string) => typeof kv[`${arch}.${k}`] === 'number' ? kv[`${arch}.${k}`] as number : undefined
   const llm: LlmMeta = {
@@ -86,7 +92,7 @@ export function parseGguf(buf: Uint8Array, fileSize = buf.length): ModelIR {
   }
   const meta: Record<string, string> = {}
   for (const [k, v] of Object.entries(kv)) if (typeof v !== 'object') meta[k] = String(v)
-  return { format: 'gguf', producer: `GGUF v${version}`, opset: [], graphName: llm.name ?? arch, inputs: [], outputs: [], tensors, nodes: [], issues, meta, fileSize, llm }
+  return { format: 'gguf', producer: `GGUF v${version}`, opset: [], graphName: llm.name ?? arch, inputs: [], outputs: [], tensors, nodes: [], issues, meta, fileSize, requiredSize, llm }
 }
 
 const FILE_TYPES: Record<number, string> = {

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { analyze, compare, FIX_LABELS, fmtBytes, nodeReportCsv, opReportCsv, summarize, type Analysis, type DeviceProfile, type FixId, defaultPin } from './engine/analyze.ts'
 import { pinDims } from './engine/onnx.ts'
+import { py, pyList, shOpt, shPath } from './engine/quote.ts'
 import { rule, TABLE_DATE } from './engine/support.ts'
 import type { Dim, ModelIR } from './engine/types.ts'
 import { GraphView, Legend, MAX_DRAW, nodeClass } from './GraphView.tsx'
@@ -8,7 +9,7 @@ import type { Tab, TabProps } from './Project.tsx'
 import { loadIr, sampleBytes } from './projectData.ts'
 import { deleteVersion, getDefaults, getFile, type Project } from './store.ts'
 import { deleteVersionCloud } from './sync.ts'
-import { ask, Code, download, Empty, fmtDate, fmtMs, fmtN, fmtSi, toast } from './ui.tsx'
+import { ask, atLeast, Code, download, Empty, fmtDate, fmtMs, fmtN, fmtSi, toast } from './ui.tsx'
 
 export default function Tabs(p: TabProps & { tab: Tab }) {
   if (p.tab === 'ops') return <OpsTab {...p} />
@@ -31,12 +32,12 @@ function Overview({ project, version, ir, a, base, update, setApplied }: TabProp
     <div className="stack">
       <div className="kpis">
         <div className="kpi"><small>Readiness</small><b>{a.score}<span className="unit">/100</span></b>{delta(a.score, base.score, String)}<p>{a.score >= 85 ? 'Ready to convert' : a.score >= 60 ? 'Converts with fallbacks' : 'Needs work before converting'}</p></div>
-        <div className="kpi"><small>{llm ? (llm.encoder ? 'One pass' : 'Decode speed') : 'Est. latency'}</small><b>{a.latency.tokensPerSec ? `${a.latency.tokensPerSec.toFixed(1)}` : fmtMs(a.latency.totalMs)}{!!a.latency.tokensPerSec && <span className="unit"> tok/s</span>}</b>{!llm && delta(a.latency.totalMs, base.latency.totalMs, fmtMs)}<p>{project.settings.device.name}</p></div>
+        <div className="kpi"><small>{llm ? (llm.encoder ? 'One pass' : 'Decode speed') : 'Est. latency'}</small><b>{a.latency.tokensPerSec ? `${a.latency.tokensPerSec.toFixed(1)}` : atLeast(a.unknownNodes, fmtMs(a.latency.totalMs))}{!!a.latency.tokensPerSec && <span className="unit"> tok/s</span>}</b>{!llm && delta(a.latency.totalMs, base.latency.totalMs, fmtMs)}<p>{project.settings.device.name}</p></div>
         {!llm && <div className="kpi"><small>Partitions</small><b>{a.partitions}</b>{delta(a.partitions, base.partitions, String)}<p>{a.switches} CPU/NPU switch{a.switches === 1 ? '' : 'es'}</p></div>}
         {!llm && <div className="kpi"><small>On the NPU</small><b>{fmtN(a.npuNodes)}<span className="unit">/{fmtN(a.npuNodes + a.cpuNodes)}</span></b><p>{a.cpuNodes} node{a.cpuNodes === 1 ? '' : 's'} on CPU</p></div>}
         <div className="kpi"><small>Parameters</small><b>{fmtSi(a.params)}</b><p>{fmtBytes(a.weightBytes)} of weights</p></div>
         {llm ? <div className="kpi"><small>KV cache</small><b>{a.latency.kvCacheBytes ? fmtBytes(a.latency.kvCacheBytes) : '—'}</b><p>{llm.encoder ? 'Encoder: no cache' : 'fp16, up to 4096 tokens'}</p></div>
-          : <div className="kpi"><small>Peak activations</small><b>{fmtBytes(a.peakBytes)}</b><p>{fmtSi(a.macs)} MACs</p></div>}
+          : <div className="kpi"><small>Peak activations</small><b>{atLeast(a.unknownNodes, fmtBytes(a.peakBytes))}</b><p>{atLeast(a.unknownNodes, fmtSi(a.macs))} MACs</p></div>}
       </div>
 
       <div className="grid-2 top">
@@ -74,8 +75,8 @@ function Overview({ project, version, ir, a, base, update, setApplied }: TabProp
               </> : <>
                 <div><dt>Nodes</dt><dd>{fmtN(a.nodeCount)} · {a.opRows.length} op types</dd></div>
                 <div><dt>Quantization</dt><dd>{QV[a.quant.verdict]}{a.quant.qdq ? ` · ${a.quant.qdq} Q/DQ nodes` : ''}</dd></div>
-                <div><dt>Compute</dt><dd>{fmtSi(a.macs)} MACs · {fmtSi(a.flops)} FLOPs</dd></div>
-                <div><dt>Peak activations</dt><dd>{fmtBytes(a.peakBytes)} at <span className="mono">{a.peakAt}</span></dd></div>
+                <div><dt>Compute</dt><dd>{atLeast(a.unknownNodes, fmtSi(a.macs))} MACs · {atLeast(a.unknownNodes, fmtSi(a.flops))} FLOPs</dd></div>
+                <div><dt>Peak activations</dt><dd>{atLeast(a.unknownNodes, fmtBytes(a.peakBytes))} at <span className="mono">{a.peakAt}</span></dd></div>
               </>}
             </dl>
           </div>
@@ -259,8 +260,8 @@ function GraphTab({ ir, a }: TabProps) {
             <p className="small">{r.reason}</p>
             {rule(n.op, n.domain).replace && <p className="small"><b>Replacement:</b> {rule(n.op, n.domain).replace}</p>}
             <dl className="facts">
-              <div><dt>MACs</dt><dd>{r.macs ? fmtSi(r.macs) : '—'}</dd></div>
-              <div><dt>Est. time</dt><dd>{fmtMs(r.ms)}</dd></div>
+              <div><dt>MACs</dt><dd>{r.unknown ? 'unknown' : r.macs ? fmtSi(r.macs) : '—'}</dd></div>
+              <div><dt>Est. time</dt><dd>{r.unknown ? 'unknown' : fmtMs(r.ms)}</dd></div>
             </dl>
             <h4>Inputs</h4>
             <ul className="io-list">{n.inputs.filter(Boolean).map(x => <li key={x}><span className="mono break">{x}</span> <span className="muted mono">{ir.tensors[x]?.init ? 'weight ' : ''}{shapeStr(ir.tensors[x]?.shape ?? null)}</span></li>)}</ul>
@@ -332,7 +333,7 @@ function FixArtifact({ f, project, version, ir, a, update }: { f: FixId; project
   const out = file.replace(/\.onnx$/i, '')
   if (f === 'pin-dims') {
     const pins = Object.fromEntries(a.symbols.map(s => [s, project.settings.pins[s] ?? defaultPin(ir, s)]))
-    const cmd = Object.entries(pins).filter(([s]) => s !== '?').map(([s, v]) => `python -m onnxruntime.tools.make_dynamic_shape_fixed --dim_param ${s} --dim_value ${v} ${file} ${out}_static.onnx`).join('\n')
+    const cmd = Object.entries(pins).filter(([s]) => s !== '?').map(([s, v]) => `python -m onnxruntime.tools.make_dynamic_shape_fixed ${shOpt('--dim_param', s)} --dim_value ${v} ${shPath(file)} ${shPath(`${out}_static.onnx`)}`).join('\n')
     return (
       <div className="stack-sm">
         <div className="inline-fields">
@@ -342,7 +343,7 @@ function FixArtifact({ f, project, version, ir, a, update }: { f: FixId; project
         </div>
         {ir.format === 'onnx' && <PinnedDownload project={project} version={version} pins={pins} />}
         {ir.format === 'onnx' && <Code label="Shell · same result with ONNX Runtime tools" code={cmd} />}
-        {ir.format === 'tflite' && <Code label="Python · re-export with a fixed signature" code={`# Re-convert with concrete input shapes so the interpreter sees no -1 dims\nconverter = tf.lite.TFLiteConverter.from_concrete_functions([\n    model.__call__.get_concrete_function(tf.TensorSpec(${JSON.stringify((a.inputs[0]?.shape ?? []).map(d => typeof d === 'number' ? d : pins[d] ?? 1))}, tf.float32))\n])\nopen("${out}_static.tflite", "wb").write(converter.convert())`} />}
+        {ir.format === 'tflite' && <Code label="Python · re-export with a fixed signature" code={`# Re-convert with concrete input shapes so the interpreter sees no -1 dims\nconverter = tf.lite.TFLiteConverter.from_concrete_functions([\n    model.__call__.get_concrete_function(tf.TensorSpec(${JSON.stringify((a.inputs[0]?.shape ?? []).map(d => typeof d === 'number' ? d : pins[d] ?? 1))}, tf.float32))\n])\nopen(${py(`${out}_static.tflite`)}, "wb").write(converter.convert())`} />}
       </div>
     )
   }
@@ -355,7 +356,7 @@ function FixArtifact({ f, project, version, ir, a, update }: { f: FixId; project
     const producedOutside = new Set(ir.nodes.flatMap((n, i) => removed.has(i) ? [] : n.outputs))
     const cut = [...new Set([...removed].flatMap(i => ir.nodes[i].inputs).filter(x => producedOutside.has(x)))]
     const keepOut = ir.outputs.filter(o => producedOutside.has(o))
-    return <Code label="Python · cut the graph before post-processing" code={`import onnx.utils\n\n# Everything up to the tensors that feed NMS stays on the NPU; NMS runs in your app.\nonnx.utils.extract_model(\n    "${file}", "${out}_npu.onnx",\n    input_names=${JSON.stringify(a.inputs.map(i => i.name))},\n    output_names=${JSON.stringify([...new Set([...cut, ...keepOut])])},\n)`} />
+    return <Code label="Python · cut the graph before post-processing" code={`import onnx.utils\n\n# Everything up to the tensors that feed NMS stays on the NPU; NMS runs in your app.\nonnx.utils.extract_model(\n    ${py(file)}, ${py(`${out}_npu.onnx`)},\n    input_names=${pyList(a.inputs.map(i => i.name))},\n    output_names=${pyList([...new Set([...cut, ...keepOut])])},\n)`} />
   }
   const ins = a.inputs.map(i => ({ name: i.name, shape: (i.shape ?? []).map(d => typeof d === 'number' ? d : project.settings.pins[d] ?? 1) }))
   return <Code label="Python · ONNX Runtime static QDQ for the QNN EP" code={quantSnippet(file, out, ins)} />
@@ -391,17 +392,17 @@ class Reader(CalibrationDataReader):
 def load_samples():
     # Replace with your data loader. Shapes must match the (pinned) model inputs.
     for _ in range(200):
-        yield {${ins.map(i => `\n            "${i.name}": np.random.rand(${i.shape.join(', ')}).astype(np.float32),`).join('')}
+        yield {${ins.map(i => `\n            ${py(i.name)}: np.random.rand(${i.shape.join(', ')}).astype(np.float32),`).join('')}
         }
 
-qnn_preprocess_model("${file}", "${out}_pre.onnx")
+qnn_preprocess_model(${py(file)}, ${py(`${out}_pre.onnx`)})
 config = get_qnn_qdq_config(
-    "${out}_pre.onnx", Reader(load_samples()),
+    ${py(`${out}_pre.onnx`)}, Reader(load_samples()),
     activation_type=QuantType.QUInt16,   # 16-bit activations: safer accuracy, still on the NPU
     weight_type=QuantType.QUInt8,        # per-channel 8-bit weights
     per_channel=True,
 )
-quantize("${out}_pre.onnx", "${out}_qdq.onnx", config)`
+quantize(${py(`${out}_pre.onnx`)}, ${py(`${out}_qdq.onnx`)}, config)`
 }
 
 function verifySnippet(file: string, a: Analysis) {
@@ -411,7 +412,7 @@ function verifySnippet(file: string, a: Analysis) {
 so = ort.SessionOptions()
 so.add_session_config_entry("session.disable_cpu_ep_fallback", "1")  # fail instead of silently using the CPU
 sess = ort.InferenceSession(
-    "${name.replace(/\.onnx$/i, a.quant.verdict === 'float' ? '_qdq.onnx' : '.onnx')}", sess_options=so,
+    ${py(name.replace(/\.onnx$/i, a.quant.verdict === 'float' ? '_qdq.onnx' : '.onnx'))}, sess_options=so,
     providers=[("QNNExecutionProvider", {"backend_path": "QnnHtp.dll", "htp_performance_mode": "burst"})],
 )
 print(sess.get_providers())`

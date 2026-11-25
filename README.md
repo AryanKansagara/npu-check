@@ -38,7 +38,10 @@ npm install
 npm run dev      # http://localhost:5173
 npm test         # engine tests
 npm run build
+npm run test:e2e # browser tests on the production build; once: npx playwright install chromium. E2E_PORT picks the port (default 4471)
 ```
+
+The end-to-end suite (`e2e/`) blocks every outside request and fails on uncaught page errors. `test.fail` marks a known bug and links its issue. GitHub Actions (job `test`) runs build, unit and end-to-end tests on every pull request; Vercel builds only `main`.
 
 Copy `.env.example` to `.env` for optional sync (public Supabase URL and publishable key).
 
