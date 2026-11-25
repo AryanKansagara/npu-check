@@ -653,7 +653,7 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
   }
   out.findings = findings(ir, out, opts, pins, floatParams)
   out.available = [...new Set(out.findings.map(f => f.fix).filter((f): f is FixId => !!f))]
-  out.score = score(out)
+  out.score = score(ir, out)
   return out
 }
 
@@ -752,18 +752,20 @@ function findings(ir: ModelIR, a: Analysis, opts: Options, pins: Record<string, 
   if (big.length) f.push({ id: 'activations', severity: 'warn', title: `${big.length} activation${big.length > 1 ? 's' : ''} larger than ${opts.device.vtcmMB} MB of NPU scratch`, detail: `Largest: ${big.sort((x, y) => y.b - x.b)[0].n.name} at ${fmtBytes(big[0].b)}. Tensors that do not fit spill to DRAM and become bandwidth-bound; tile the input or reduce resolution.`, nodes: big.map(x => x.n.name) })
   if (a.opset !== null && a.opset < 13) f.push({ id: 'opset', severity: 'info', title: `Old opset ${a.opset}`, detail: 'Converters are tested most against opset 13 to 20. Re-export with opset_version=17 to avoid legacy op semantics.' })
   if (a.externalBytes) f.push({ id: 'external', severity: 'info', title: `${fmtBytes(a.externalBytes)} of weights in external data`, detail: 'Required above 2 GB and common for smaller exports too. Keep the .data file next to the .onnx when converting; it is not needed for this inspection.' })
-  for (const i of ir.issues.filter(x => x.level === 'error').slice(0, 5)) f.push({ id: `issue-${i.where}`, severity: 'warn', title: `Graph issue at ${i.where}`, detail: i.message })
+  for (const i of ir.issues.filter(x => x.level === 'error').slice(0, 5)) f.push({ id: `issue-${i.where}`, severity: 'blocker', title: `Graph issue at ${i.where}`, detail: i.message })
   return f
 }
 
-function score(a: Analysis): number {
+function score(ir: ModelIR, a: Analysis): number {
   if (a.format === 'gguf') return a.dtypes.int4.params + a.dtypes.int8.params > a.params / 2 ? 70 : 45
   const total = Math.max(1, a.npuNodes + a.cpuNodes)
   let s = 100 * a.npuNodes / total
   s -= Math.min(20, Math.max(0, a.partitions - 1) * 5)
   if (a.quant.precision !== 'int8') s -= 15
   if (a.findings.some(f => f.id === 'activations')) s -= 5
-  return Math.max(0, Math.min(100, Math.round(s)))
+  // A runtime refuses a structurally invalid graph, whatever the rest looks like.
+  const top = ir.issues.some(i => i.level === 'error') ? 40 : 100
+  return Math.max(0, Math.min(top, Math.round(s)))
 }
 
 // ---------- Reports ----------

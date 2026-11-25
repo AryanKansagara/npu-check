@@ -38,13 +38,11 @@ test('a hostile input name stays inside its Python string (#3)', async ({ page }
 })
 
 test('a graph with a missing input is not ready to convert (#4)', async ({ page }) => {
-  test.fail(true, issue(4))
   await importModel(page, 'ghost.onnx', small([{ op: 'Add', in: ['x', 'ghost'], out: ['y'] }]))
   await expect(kpi(page, 'Readiness')).toContainText('Needs work')
 })
 
 test('a cycle is reported at import (#4)', async ({ page }) => {
-  test.fail(true, issue(4))
   await choose(page, 'cycle.onnx', small([{ op: 'Add', in: ['x', 'b'], out: ['a'] }, { op: 'Relu', in: ['a'], out: ['b'] }, { op: 'Relu', in: ['b'], out: ['y'] }]))
   await expect(page.locator('.error-row')).toContainText(/cycle/i)
 })
