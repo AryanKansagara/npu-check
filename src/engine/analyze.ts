@@ -628,7 +628,10 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
   const totalMs = npuMs + cpuMs + switchMs
   const latency: Analysis['latency'] = { npuMs, cpuMs, switchMs, totalMs, computeShare: totalMs ? computeMs / totalMs : 0 }
 
-  if (ir.llm) {
+  if (ir.llm && !weightBytes) {
+    // Vocab-only: there is nothing to run, so no speed or latency exists.
+    latency.totalMs = latency.npuMs = NaN
+  } else if (ir.llm) {
     // Decode is memory-bound: every token streams all weights once.
     const wb = weightBytes * (quantFix && dtypes.int4.params < params / 2 ? 0.25 : 1)
     const L = ir.llm
@@ -758,6 +761,10 @@ function findings(ir: ModelIR, a: Analysis, opts: Options, pins: Record<string, 
   const applied = new Set(opts.applied)
   if (ir.llm) {
     const L = ir.llm
+    if (!a.weightBytes) {
+      f.push({ id: 'no-weights', severity: 'blocker', title: 'This file has no weights', detail: 'It holds only metadata, such as a tokenizer vocabulary or the first part of a split model, so there is no speed, latency or memory estimate. Import the .gguf that contains the tensors.' })
+      return f
+    }
     if (L.encoder) f.push({ id: 'llm-path', severity: 'info', title: 'Encoder-only model: export a graph for the NPU', detail: `GGUF is a llama.cpp format with no operator graph. For the NPU, export this ${L.arch} encoder to ONNX with a fixed sequence length and quantize it; there is no decode loop or KV cache. ${L.blockCount ?? '?'} blocks, context ${L.contextLength ?? '?'}. The estimate is one pass over ${Math.min(L.contextLength ?? 512, pins.ctx ?? 512)} tokens.` })
     else f.push({ id: 'llm-path', severity: 'info', title: 'LLM weights: plan the runtime, not just the file', detail: `GGUF is a llama.cpp format. On Snapdragon, NPU execution of LLMs goes through a converted model (QAIRT / Genie, or llama.cpp's experimental Hexagon backend), with static context buckets and a KV cache sized up front. Architecture: ${L.arch}${L.blockCount ? `, ${L.blockCount} blocks` : ''}${L.contextLength ? `, trained context ${L.contextLength}` : ''}.` })
     if (a.dtypes.fp32.params + a.dtypes.fp16.params > a.params * 0.5) f.push({ id: 'llm-float', severity: 'warn', title: 'Mostly float weights', detail: `Decode streams every weight per token, so ${fmtBytes(a.weightBytes)} of float weights caps throughput. A 4-bit build cuts memory traffic about 4x versus fp16.`, fix: 'quantize-int8' })
@@ -801,6 +808,7 @@ function findings(ir: ModelIR, a: Analysis, opts: Options, pins: Record<string, 
 }
 
 function score(ir: ModelIR, a: Analysis): number {
+  if (a.format === 'gguf' && !a.weightBytes) return 0
   if (a.format === 'gguf') return a.dtypes.int4.params + a.dtypes.int8.params > a.params / 2 ? 70 : 45
   const total = Math.max(1, a.npuNodes + a.cpuNodes)
   const confirmed = a.npuNodes - a.nodes.filter(n => n.unknown && n.status === 'npu').length
@@ -856,7 +864,7 @@ export interface Diff {
 export function compare(a: Summary, b: Summary): Diff {
   const m = (key: keyof Summary, label: string, lowerIsBetter: boolean | null) => {
     const x = a[key] as number, y = b[key] as number
-    return { key, label, a: x, b: y, better: lowerIsBetter === null || x === y ? null : lowerIsBetter ? y < x : y > x }
+    return { key, label, a: x, b: y, better: lowerIsBetter === null || x === y || !Number.isFinite(x) || !Number.isFinite(y) ? null : lowerIsBetter ? y < x : y > x }
   }
   const metrics = [
     m('score', 'Readiness score', false), m('latencyMs', 'Estimated latency (ms)', true), m('partitions', 'Partitions', true),

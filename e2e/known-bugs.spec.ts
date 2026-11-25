@@ -110,9 +110,14 @@ test('KV cache uses the declared head size (#11)', async ({ page }) => {
 })
 
 test('a vocab-only GGUF shows no speed (#12)', async ({ page }) => {
-  test.fail(true, issue(12))
   await importModel(page, 'vocab.gguf', gguf([['general.architecture', 'llama']], [], 0))
   await expect(page.locator('.kpis')).not.toContainText('Infinity', { timeout: 3000 })
+  await expect(kpi(page, 'Decode speed').locator('b')).toHaveText('—')
+  await expect(kpi(page, 'Readiness')).toContainText('0/100')
+  await expect(fact(page, 'Prefill \\(512 tok\\)')).toHaveText('—')
+  await expect(finding(page, 'This file has no weights')).toBeVisible()
+  await tab(page, 'History').click()
+  await expect(page.locator('tr.current')).toContainText('—')
 })
 
 test('fp16 intermediates count two bytes (#13)', async ({ page }) => {
