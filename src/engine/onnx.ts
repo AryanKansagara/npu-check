@@ -3,7 +3,7 @@
 import { Reader, rewrite, Writer, type Field } from './pb.ts'
 import type { AttrValue, Dim, DType, Issue, ModelIR, ModelNode, TensorInfo } from './types.ts'
 
-const ONNX_DTYPES: Record<number, DType> = {
+export const ONNX_DTYPES: Record<number, DType> = {
   1: 'fp32', 2: 'uint8', 3: 'int8', 4: 'uint16', 5: 'int16', 6: 'int32', 7: 'int64', 8: 'string', 9: 'bool',
   10: 'fp16', 11: 'fp64', 12: 'uint32', 13: 'uint64', 14: 'complex', 15: 'complex', 16: 'bf16',
   17: 'fp8', 18: 'fp8', 19: 'fp8', 20: 'fp8', 21: 'uint4', 22: 'int4', 23: 'fp8',

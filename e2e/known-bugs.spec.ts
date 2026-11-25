@@ -101,7 +101,6 @@ test('a vocab-only GGUF shows no speed (#12)', async ({ page }) => {
 })
 
 test('fp16 intermediates count two bytes (#13)', async ({ page }) => {
-  test.fail(true, issue(13))
   await importModel(page, 'half.onnx', onnx({ inputs: [{ name: 'x', shape: [1, 16, 8, 8], type: 'fp16' }], outputs: [{ name: 'y', shape: [1, 16, 8, 8], type: 'fp16' }], nodes: [{ op: 'Relu', in: ['x'], out: ['a'] }, { op: 'Relu', in: ['a'], out: ['y'] }] }))
   await expect(kpi(page, 'Peak activations')).toContainText('4.0 KB')
 })
