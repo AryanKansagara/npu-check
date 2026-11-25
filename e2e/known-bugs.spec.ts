@@ -36,19 +36,16 @@ test('a hostile input name stays inside its Python string (#3)', async ({ page }
 })
 
 test('a graph with a missing input is not ready to convert (#4)', async ({ page }) => {
-  test.fail(true, issue(4))
   await importModel(page, 'ghost.onnx', small([{ op: 'Add', in: ['x', 'ghost'], out: ['y'] }]))
   await expect(kpi(page, 'Readiness')).toContainText('Needs work')
 })
 
 test('a cycle is reported at import (#4)', async ({ page }) => {
-  test.fail(true, issue(4))
   await choose(page, 'cycle.onnx', small([{ op: 'Add', in: ['x', 'b'], out: ['a'] }, { op: 'Relu', in: ['a'], out: ['b'] }, { op: 'Relu', in: ['b'], out: ['y'] }]))
   await expect(page.locator('.error-row')).toContainText(/cycle/i)
 })
 
 test('unknown shapes are reported and lower the score (#5)', async ({ page }) => {
-  test.fail(true, issue(5))
   await importModel(page, 'unknown.onnx', small([{ op: 'GatherND', name: 'gn', in: ['x', 'i'], out: ['g'] }, { op: 'Relu', name: 'r', in: ['g'], out: ['y'] }], {
     inits: [{ name: 'i', dims: [1, 1], ints: [0] }], outputs: [{ name: 'y', shape: [] }] }))
   await expect(finding(page, /unknown shape/i)).toContainText('gn')
