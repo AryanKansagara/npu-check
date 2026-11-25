@@ -71,23 +71,27 @@ class FB {
     return kind === 'u8' ? this.dv.getUint8(p) : kind === 'i32' ? this.dv.getInt32(p, true) : this.dv.getUint32(p, true)
   }
   ref(t: number, i: number) { const p = this.field(t, i); return p ? p + this.u32(p) : 0 }
-  vec(t: number, i: number): { pos: number; len: number } | null {
+  /** `width` is the size of one element: the whole vector has to be inside the file. */
+  vec(t: number, i: number, width = 1): { pos: number; len: number } | null {
     const v = this.ref(t, i)
-    return v ? { pos: v + 4, len: this.u32(v) } : null
+    if (!v) return null
+    const len = this.u32(v)
+    if (v + 4 + len * width > this.buf.length) throw new Error(`FlatBuffer vector at ${v} (${len} elements) runs past the end of the file`)
+    return { pos: v + 4, len }
   }
   str(t: number, i: number) {
     const v = this.vec(t, i)
     return v ? new TextDecoder().decode(this.buf.subarray(v.pos, v.pos + v.len)) : ''
   }
   i32s(t: number, i: number): number[] {
-    const v = this.vec(t, i)
+    const v = this.vec(t, i, 4)
     if (!v) return []
     const out: number[] = []
     for (let k = 0; k < v.len; k++) out.push(this.dv.getInt32(v.pos + k * 4, true))
     return out
   }
   tables(t: number, i: number): number[] {
-    const v = this.vec(t, i)
+    const v = this.vec(t, i, 4)
     if (!v) return []
     const out: number[] = []
     for (let k = 0; k < v.len; k++) { const p = v.pos + k * 4; out.push(p + this.u32(p)) }
@@ -111,7 +115,12 @@ export function parseTflite(buf: Uint8Array): ModelIR {
   const buffers = fb.tables(m, 4).map(b => {
     const d = fb.vec(b, 0)
     const sizeP = fb.field(b, 2)
-    return d ? d.len : sizeP ? Number(fb.dv.getBigUint64(sizeP, true)) : 0
+    if (d || !sizeP) return d?.len ?? 0
+    // Models over 2 GB keep buffers after the FlatBuffer; offsets 0 and 1 mean there is none.
+    const size = Number(fb.dv.getBigUint64(sizeP, true)), offP = fb.field(b, 1)
+    const offset = offP ? Number(fb.dv.getBigUint64(offP, true)) : 0
+    if (offset > 1 && offset + size > buf.length) throw new Error(`Buffer at ${offset} (${size} bytes) runs past the end of the file`)
+    return size
   })
   const subgraphs = fb.tables(m, 2)
   if (!subgraphs.length) throw new Error('TFLite model has no subgraphs.')
@@ -129,7 +138,7 @@ export function parseTflite(buf: Uint8Array): ModelIR {
     if (bufIdx > 0 && buffers[bufIdx] > 0) { info.init = true; info.bytes = buffers[bufIdx] }
     const q = fb.ref(t, 4)
     if (q) {
-      const scales = fb.vec(q, 2)?.len ?? 0
+      const scales = fb.vec(q, 2, 4)?.len ?? 0
       if (scales) info.quant = { scales, axis: fb.scalar(q, 6, 'i32') }
     }
     tensors[name] = info

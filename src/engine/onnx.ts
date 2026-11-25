@@ -65,6 +65,8 @@ export function parseOnnx(buf: Uint8Array): ModelIR {
   for (const v of vinfos) if (!ir.tensors[v.name]?.init) ir.tensors[v.name] = v
   // Older exporters list initializers as graph inputs too; those are weights, not inputs.
   ir.inputs = ir.inputs.filter(n => !initNames.has(n))
+  // opset_import is required from IR version 3 on; a file cut right after its graph has none.
+  if (!ir.opset.length && ir.irVersion >= 3) throw new Error('No opset_import after the graph.')
   if (!ir.opset.length) ir.issues.push({ level: 'warn', where: 'model', message: 'No opset_import; assuming the default ONNX domain.' })
   const externals = Object.values(ir.tensors).filter(t => t.external)
   if (externals.length) ir.issues.push({ level: 'info', where: 'initializers', message: `${externals.length} initializers live in external data files (not needed here: sizes come from their dims).` })
@@ -204,6 +206,35 @@ function checkGraph(ir: ModelIR) {
     for (const x of n.inputs) if (!produced.has(x)) ir.issues.push({ level: 'error', where: `node ${i} (${n.name})`, message: `Input "${x}" has no producer, initializer or graph input.` })
   })
   for (const o of ir.outputs) if (!produced.has(o)) ir.issues.push({ level: 'error', where: 'graph outputs', message: `Output "${o}" is never produced.` })
+  const loop = findCycle(ir)
+  if (loop) ir.issues.push({ level: 'error', where: `node ${loop[0]} (${ir.nodes[loop[0]].name})`, message: `Nodes form a cycle, so none of them can run first: ${[...loop.slice(0, 5), ...(loop.length > 5 ? [] : [loop[0]])].map(i => ir.nodes[i].name).join(' -> ')}${loop.length > 5 ? ` and ${loop.length - 5} more` : ''}.` })
+}
+
+/** Node indexes of one cycle in data order, or null. Nodes listed out of order are not a cycle. */
+function findCycle(ir: ModelIR): number[] | null {
+  const producer = new Map<string, number>()
+  ir.nodes.forEach((n, i) => n.outputs.forEach(o => o && !ir.tensors[o]?.init && producer.set(o, i)))
+  const state = new Uint8Array(ir.nodes.length) // 1 = on the current path, 2 = clear
+  for (let root = 0; root < ir.nodes.length; root++) {
+    if (state[root]) continue
+    // Iterative walk from consumer to producer: real graphs are deeper than the call stack.
+    const path = [{ i: root, k: 0 }]
+    state[root] = 1
+    while (path.length) {
+      const top = path[path.length - 1]
+      const inputs = ir.nodes[top.i].inputs
+      if (top.k === inputs.length) { state[top.i] = 2; path.pop(); continue }
+      const p = producer.get(inputs[top.k++])
+      if (p === undefined || state[p] === 2) continue
+      if (state[p] === 1) {
+        const [first, ...rest] = path.slice(path.findIndex(x => x.i === p)).map(x => x.i)
+        return [first, ...rest.reverse()]
+      }
+      state[p] = 1
+      path.push({ i: p, k: 0 })
+    }
+  }
+  return null
 }
 
 // ---------- Encoder (synthetic samples and tests) ----------
