@@ -112,7 +112,6 @@ test('TFLite weights with the same name are both counted (#14)', async ({ page }
 })
 
 test('a -1 dim is dynamic, not empty (#15)', async ({ page }) => {
-  test.fail(true, issue(15))
   await choose(page, 'neg.onnx', small([{ ...conv, in: ['x', 'w'] }], { inputs: [{ name: 'x', shape: [-1, 16, 8, 8] }], outputs: [{ name: 'y', shape: ['', 64, 8, 8] }], inits: w64 }))
   await save(page)
   await expect(finding(page, 'Dynamic input shapes')).toBeVisible()
