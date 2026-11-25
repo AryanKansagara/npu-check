@@ -1,5 +1,6 @@
 // Readiness analysis: shapes, op inventory, NPU assignment, partitions, MACs, activation memory,
 // quantization readiness, roofline latency and fix recommendations.
+import { inferTypes } from './elemtypes.ts'
 import { rule, type Support } from './support.ts'
 import { DTYPE_BYTES, isStatic, type Dim, type ModelIR, type ModelNode, type TensorInfo } from './types.ts'
 
@@ -450,6 +451,7 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
   const order = topoOrder(ir)
   const symShapes = inferShapes(ir, undefined, order)
   const numShapes = inferShapes(ir, pins, order)
+  const types = inferTypes(ir, order)
   const checkShapes = pinned ? numShapes : symShapes
 
   // Weights
@@ -481,7 +483,6 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
   const quantized = qdq > 0 || qlinear > 0 || tflQuant
   const verdict: Analysis['quant']['verdict'] = quantized ? (perChannel ? 'quantized-per-channel' : 'quantized-per-tensor') : intWeightShare > 0.5 ? 'weight-only' : 'float'
   const precision: 'int8' | 'fp16' = quantized || quantFix ? 'int8' : 'fp16'
-  const actScale = quantFix && !quantized ? 0.25 : 1
   // QDQ and QOperator files keep fp32 tensors between the quantize nodes, but the compiled graph runs them at the
   // quantized width (the zero-point type of the activation QuantizeLinear nodes). Dynamic quantization stays float.
   const dynQuant = ir.nodes.some(n => /^DynamicQuantize|Integer$/.test(n.op))
@@ -580,9 +581,12 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
   order.forEach((ni, step) => ir.nodes[ni].inputs.forEach(x => isAct(x) && lastUse.set(x, step)))
   const outputsSet = new Set(ir.outputs)
   const actBytes = (name: string) => {
-    const dt = ir.tensors[name]?.dtype
-    const width = fileQuant && (!dt || dt === 'fp32' || dt === 'unknown') ? qActBytes : DTYPE_BYTES[dt ?? 'fp32'] ?? 4
-    return numel(numShapes[name], pins) * width * actScale
+    const dt = types[name], declared = ir.tensors[name] && ir.tensors[name].dtype !== 'unknown'
+    const float = !dt || /^b?fp?\d/.test(dt)
+    const width = fileQuant && (!dt || dt === 'fp32' || (float && !declared)) ? qActBytes
+      : quantFix && !quantized && float ? 1 // int8 once quantized
+      : DTYPE_BYTES[dt ?? 'fp32'] ?? 4
+    return numel(numShapes[name], pins) * width
   }
   let live = 0, peakBytes = 0, peakAt = ''
   const liveSet = new Set<string>()
