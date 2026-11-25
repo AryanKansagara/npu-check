@@ -71,7 +71,7 @@ function Overview({ project, version, ir, a, base, update, setApplied }: TabProp
                 <div><dt>Layers / width</dt><dd>{llm.blockCount ?? '—'} blocks · {llm.embeddingLength ?? '—'} wide · {llm.headCount ?? '—'} heads ({llm.headCountKv ?? llm.headCount ?? '—'} KV)</dd></div>
                 <div><dt>Context</dt><dd>{llm.contextLength ? fmtN(llm.contextLength) : '—'} tokens</dd></div>
                 <div><dt>File type</dt><dd>{llm.fileType ?? '—'}</dd></div>
-                <div><dt>{llm.encoder ? 'Full pass' : 'Prefill (512 tok)'}</dt><dd>{fmtMs(a.latency.prefillMs ?? 0)} if compute-bound on the NPU</dd></div>
+                <div><dt>{llm.encoder ? 'Full pass' : 'Prefill (512 tok)'}</dt><dd>{a.latency.prefillMs === undefined ? '—' : `${fmtMs(a.latency.prefillMs)} if compute-bound on the NPU`}</dd></div>
               </> : <>
                 <div><dt>Nodes</dt><dd>{fmtN(a.nodeCount)} · {a.opRows.length} op types</dd></div>
                 <div><dt>Quantization</dt><dd>{QV[a.quant.verdict]}{a.quant.qdq ? ` · ${a.quant.qdq} Q/DQ nodes` : ''}</dd></div>
