@@ -128,8 +128,14 @@ export function parseTflite(buf: Uint8Array): ModelIR {
   const sg = subgraphs[0]
   const tensors: Record<string, TensorInfo> = {}
   const names: string[] = []
-  fb.tables(sg, 0).forEach((t, i) => {
-    const name = fb.str(t, 3) || `tensor_${i}`
+  const tables = fb.tables(sg, 0)
+  // Operators address tensors by index; names are labels and may repeat. Repeats get their index appended.
+  const labels = tables.map((t, i) => fb.str(t, 3) || `tensor_${i}`)
+  const taken = new Set(labels), used = new Set<string>()
+  tables.forEach((t, i) => {
+    let name = labels[i]
+    if (used.has(name)) { do name += `#${i}`; while (taken.has(name)) }
+    used.add(name); taken.add(name)
     const shape: Dim[] = fb.i32s(t, 0)
     const sig = fb.i32s(t, 7)
     sig.forEach((d, k) => { if (d < 0) shape[k] = k === 0 ? 'batch' : `dim${k}` })
