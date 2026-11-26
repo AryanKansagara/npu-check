@@ -83,7 +83,6 @@ test('the shell command pins every dim, not only the last (#9)', async ({ page }
 })
 
 test('a reversed Slice keeps its length (#10)', async ({ page }) => {
-  test.fail(true, issue(10))
   await importModel(page, 'flip.onnx', small([{ op: 'Slice', in: ['x', 's', 'e', 'a', 'p'], out: ['f'] }, { op: 'Relu', in: ['f'], out: ['y'] }], {
     inits: [{ name: 's', dims: [1], ints: [-1] }, { name: 'e', dims: [1], ints: [-9007199254740991] }, { name: 'a', dims: [1], ints: [1] }, { name: 'p', dims: [1], ints: [-1] }] }))
   expect((await nodeCsv(page))[0].output_shape).toBe('1x16x8x8')
