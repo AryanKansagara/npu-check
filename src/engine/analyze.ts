@@ -626,7 +626,10 @@ export function analyze(ir: ModelIR, opts: Options): Analysis {
     latency.prefillMs = 2 * (params - (ir.tensors['output.weight'] ? embd : 0)) * prefillTokens / npuRate * 1000
     if (L.blockCount && L.embeddingLength && L.contextLength) {
       const kvRatio = L.headCount && L.headCountKv ? L.headCountKv / L.headCount : 1
-      latency.kvCacheBytes = 2 * L.blockCount * Math.min(L.contextLength, pins.ctx ?? 4096) * L.embeddingLength * kvRatio * 2
+      const heads = L.headCountKv || L.headCount, perToken = L.embeddingLength * kvRatio
+      // Heads need not divide the width: a declared per-head size wins.
+      const row = (perHead: number | undefined) => perHead !== undefined && perHead >= 0 && heads ? heads * perHead : perToken
+      latency.kvCacheBytes = L.blockCount * Math.min(L.contextLength, pins.ctx ?? 4096) * (row(L.keyLength) + row(L.valueLength)) * 2
     }
     latency.totalMs = 1000 / latency.tokensPerSec
     latency.npuMs = latency.totalMs

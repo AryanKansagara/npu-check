@@ -90,7 +90,6 @@ test('a reversed Slice keeps its length (#10)', async ({ page }) => {
 })
 
 test('KV cache uses the declared head size (#11)', async ({ page }) => {
-  test.fail(true, issue(11))
   await importModel(page, 'q.gguf', llm([['qwen3.block_count', 28], ['qwen3.context_length', 40960], ['qwen3.embedding_length', 1024], ['qwen3.attention.head_count', 16], ['qwen3.attention.head_count_kv', 8], ['qwen3.attention.key_length', 128], ['qwen3.attention.value_length', 128]], 'qwen3'))
   // 28 * 4,096 * (8*128 + 8*128) * 2 B = 448 MiB.
   await expect(kpi(page, 'KV cache')).toContainText('448.0 MB')
